@@ -17,7 +17,7 @@ namespace Town
     {
         uint32_t questId = 0;
         bool rewardBlocked = false;
-        bool onCurrentMap = false;
+        bool reachable = false;
         bool hasKnownPosition = false;
         float distanceFromTownSq = 0.0f;
     };

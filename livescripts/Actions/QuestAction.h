@@ -4,6 +4,7 @@
 #include "Blackboard/BotBlackboard.h"
 #include "ObjectGuid.h"
 #include "Combat/ClassStrategies/IClassStrategy.h"
+#include "Travel/WorldTravel.h"
 #include <memory>
 #include <string>
 
@@ -50,6 +51,7 @@ namespace Actions
         uint32_t _creatureSearchCooldownMs = 0;
         uint32_t _gameObjectSearchCooldownMs = 0;
         uint64_t _lastProgressSignature = 0;
+        Travel::WorldTravel _worldTravel;
     };
 
     class AcceptQuestAction : public BotAction
@@ -75,6 +77,7 @@ namespace Actions
         ActionOutcome _outcome = ActionOutcome::Running;
         std::string _outcomeReason;
         Common::FailsafeTimer _failsafe;
+        Travel::WorldTravel _worldTravel;
     };
 
     class TurnInQuestAction : public BotAction
@@ -101,5 +104,6 @@ namespace Actions
         std::string _outcomeReason;
         Common::FailsafeTimer _failsafe;
         uint32_t _retryLogTimerMs;
+        Travel::WorldTravel _worldTravel;
     };
 }

@@ -4,7 +4,9 @@
 #include "Helper/ConsumableReservePolicy.h"
 #include "Helper/ProgressionPolicy.h"
 #include "Combat/CombatPositioning.h"
+#include "Travel/TravelGraph.h"
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -118,7 +120,7 @@ namespace
             "blocked loot cleanup should require at least one observable free slot");
     }
 
-    void TestCrossMapAndUnknownTurnInsAreIgnored()
+    void TestReachableCrossMapTurnInsArePlanned()
     {
         Town::PlanningInput input;
         input.freeBagSlots = 10;
@@ -130,7 +132,7 @@ namespace
 
         Town::Plan plan = Town::BuildPlan(input);
         Expect(plan.steps == std::vector<Town::Step>{ { Town::Service::TurnInQuest, 300 } },
-            "only reachable, positioned turn-ins should be planned");
+            "known turn-ins should be planned when the world graph can travel to their map");
     }
 
     void TestServiceVerificationRequiresObservableProgress()
@@ -250,6 +252,58 @@ namespace
         Expect(CombatPositioning::ChooseRangeAdjustment(20.0f, 8.0f, 28.0f, true) ==
             RangeAdjustment::Hold, "ranged combat should hold a valid firing position");
     }
+
+    void TestWorldTravelGraphModesAndRecovery()
+    {
+        using namespace Travel;
+
+        TravelGraph graph;
+        uint32_t town = graph.AddNode({ 0.0f, 0.0f, 0.0f, 0 },
+            TravelNodeKind::FlightMaster, 10);
+        uint32_t coast = graph.AddNode({ 1000.0f, 0.0f, 0.0f, 0 },
+            TravelNodeKind::FlightMaster, 20);
+        uint32_t harbour = graph.AddNode({ 1100.0f, 0.0f, 0.0f, 0 },
+            TravelNodeKind::TransportStop, 500);
+        uint32_t farHarbour = graph.AddNode({ 0.0f, 0.0f, 0.0f, 1 },
+            TravelNodeKind::TransportStop, 500);
+        graph.AddEdge(town, coast, TravelMode::FlightPath, 50.0f, 100);
+        graph.AddEdge(coast, town, TravelMode::FlightPath, 50.0f, 101);
+        graph.AddEdge(coast, harbour, TravelMode::Walk, 100.0f);
+        graph.AddEdge(harbour, coast, TravelMode::Walk, 100.0f);
+        uint64_t transportEdge = graph.AddEdge(harbour, farHarbour,
+            TravelMode::Transport, 200.0f, 500);
+
+        RouteOptions discovered;
+        discovered.knownTaxiNodes = { 10, 20 };
+        std::vector<RouteStep> route = graph.FindRoute(
+            { 0.0f, 0.0f, 0.0f, 0 }, { 20.0f, 0.0f, 0.0f, 1 }, discovered);
+        Expect(std::any_of(route.begin(), route.end(), [](const RouteStep& step) {
+            return step.mode == TravelMode::FlightPath;
+        }), "a discovered flight path should be used by the world route");
+        Expect(std::any_of(route.begin(), route.end(), [](const RouteStep& step) {
+            return step.mode == TravelMode::Transport;
+        }), "a cross-map route should include its transport transition");
+
+        RouteOptions undiscovered;
+        std::vector<RouteStep> groundRoute = graph.FindRoute(
+            { 0.0f, 0.0f, 0.0f, 0 }, { 20.0f, 0.0f, 0.0f, 1 }, undiscovered);
+        Expect(std::none_of(groundRoute.begin(), groundRoute.end(), [](const RouteStep& step) {
+            return step.mode == TravelMode::FlightPath;
+        }), "undiscovered taxi nodes must not authorize a flight");
+
+        discovered.blockedEdges.insert(transportEdge);
+        std::vector<RouteStep> blocked = graph.FindRoute(
+            { 0.0f, 0.0f, 0.0f, 0 }, { 20.0f, 0.0f, 0.0f, 1 }, discovered);
+        Expect(blocked.empty(), "a failed transition should be excluded during route recovery");
+
+        RouteOptions hearth;
+        hearth.canUseHearthstone = true;
+        hearth.home = { 10.0f, 0.0f, 0.0f, 1 };
+        std::vector<RouteStep> hearthRoute = graph.FindRoute(
+            { 500.0f, 500.0f, 0.0f, 0 }, { 20.0f, 0.0f, 0.0f, 1 }, hearth);
+        Expect(!hearthRoute.empty() && hearthRoute.front().mode == TravelMode::Hearthstone,
+            "the hearthstone should provide a valid directed fallback to the home map");
+    }
 }
 
 int main()
@@ -260,7 +314,7 @@ int main()
     TestMissingVendorBlocksVendorWorkButNotSafeTurnIn();
     TestProtectedInventoryDoesNotPromiseRewardSpace();
     TestBlockedLootWithoutSellableItemsGetsCleanupAttempt();
-    TestCrossMapAndUnknownTurnInsAreIgnored();
+    TestReachableCrossMapTurnInsArePlanned();
     TestServiceVerificationRequiresObservableProgress();
     TestRosterParsingAndCycling();
     TestBehaviorProfileTuning();
@@ -269,6 +323,7 @@ int main()
     TestRecoveryStackSelection();
     TestProgressionDifficultyPolicy();
     TestCombatRangePolicy();
+    TestWorldTravelGraphModesAndRecovery();
 
     if (failures != 0)
     {

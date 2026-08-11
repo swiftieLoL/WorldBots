@@ -19,7 +19,7 @@ namespace Town
 
         bool hasBlockedReward = std::any_of(input.completedQuests.begin(), input.completedQuests.end(),
             [](const QuestTurnInCandidate& quest) {
-                return quest.onCurrentMap && quest.hasKnownPosition && quest.rewardBlocked;
+                return quest.reachable && quest.hasKnownPosition && quest.rewardBlocked;
             });
         bool needsReservedSpace = hasBlockedReward && input.freeBagSlots < input.rewardReserveSlots;
         bool shouldSell = input.hasSellableItems && (input.needsInventoryCleanup || needsReservedSpace);
@@ -59,7 +59,7 @@ namespace Town
         std::vector<QuestTurnInCandidate> turnIns;
         for (const QuestTurnInCandidate& quest : input.completedQuests)
         {
-            if (quest.questId == 0 || !quest.onCurrentMap || !quest.hasKnownPosition)
+            if (quest.questId == 0 || !quest.reachable || !quest.hasKnownPosition)
                 continue;
 
             // Do not send the bot to a quest giver while its reward is known

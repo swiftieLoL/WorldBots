@@ -13,6 +13,8 @@ target_sources(WorldBots PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/Diagnostics/BotTrace.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/Config/BotConfig.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/Helper/TeleportUtils.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/Travel/TravelGraph.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/Travel/WorldTravel.cpp"
 )
 
 set(WORLDBOTS_MODULE_CONFIG_FILE "${CMAKE_CURRENT_LIST_DIR}/../config/worldbots.conf")
@@ -27,6 +29,7 @@ if(WORLDBOTS_BUILD_LOGIC_TESTS)
         "${CMAKE_CURRENT_LIST_DIR}/../tests/WorldBotsLogicTests.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/Town/TownPlanning.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/Factory/BotRoster.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/Travel/TravelGraph.cpp"
     )
     target_compile_features(WorldBotsLogicTests PRIVATE cxx_std_20)
     target_include_directories(WorldBotsLogicTests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
@@ -81,6 +84,7 @@ target_include_directories(WorldBots PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/Town"
     "${CMAKE_CURRENT_SOURCE_DIR}/Testing"
     "${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Travel"
 )
 
 # Dynamically add all directories containing headers inside TrinityCore/src

@@ -25,6 +25,7 @@ namespace Actions
         _outcome = ActionOutcome::Running;
         _outcomeReason.clear();
         _failsafe.Reset();
+        _worldTravel.Reset();
     }
 
     void AcceptQuestAction::Update(Player* bot, MovementManager* movement, const Blackboard::BotBlackboard& blackboard, uint32_t deltaMs)
@@ -57,13 +58,26 @@ namespace Actions
         }
         const auto& available = *selected;
 
-        if (!available.hasQuestGiverPosition || available.questGiverPosition.mapId != bot->GetMapId())
+        if (!available.hasQuestGiverPosition)
         {
-            TC_LOG_WARN("server", "[WorldBots] [Quest] Bot '{}' cannot accept quest {} because its quest giver is on map {} while the bot is on map {}",
-                bot->GetName(), available.questId, available.questGiverPosition.mapId, bot->GetMapId());
             _outcome = ActionOutcome::Blocked;
-            _outcomeReason = "quest giver is missing or requires cross-map travel";
+            _outcomeReason = "quest giver position is missing";
             _completed = true;
+            return;
+        }
+
+        if (_worldTravel.IsActive() || Travel::WorldTravel::NeedsTravel(bot, available.questGiverPosition))
+        {
+            Travel::TravelResult travelResult = _worldTravel.Update(bot, movement,
+                available.questGiverPosition, deltaMs);
+            if (travelResult == Travel::TravelResult::Failed)
+            {
+                _outcome = ActionOutcome::Blocked;
+                _outcomeReason = _worldTravel.GetFailureReason();
+                _completed = true;
+            }
+            else if (travelResult == Travel::TravelResult::Arrived)
+                _failsafe.Reset();
             return;
         }
 
@@ -196,11 +210,8 @@ namespace Actions
         }
     }
 
-    void AcceptQuestAction::Stop(Player* /*bot*/, MovementManager* movement)
+    void AcceptQuestAction::Stop(Player* bot, MovementManager* movement)
     {
-        if (movement)
-        {
-            movement->Stop();
-        }
+        _worldTravel.Stop(bot, movement);
     }
 }

@@ -74,6 +74,7 @@ namespace Actions
         _creatureSearchCooldownMs = 0;
         _gameObjectSearchCooldownMs = 0;
         _lastProgressSignature = 0;
+        _worldTravel.Reset();
 
         if (!_lockedQuestId)
             Finish(ActionOutcome::Blocked, "the brain did not provide a quest context");
@@ -373,9 +374,15 @@ namespace Actions
             Finish(ActionOutcome::Unsupported, "quest template is missing");
             return;
         }
-        if (active->hasTargetPosition && active->targetPosition.mapId != bot->GetMapId())
+        if (active->hasTargetPosition &&
+            (_worldTravel.IsActive() || Travel::WorldTravel::NeedsTravel(bot, active->targetPosition)))
         {
-            Finish(ActionOutcome::Blocked, "objective requires cross-map travel and no route is available");
+            if (_lastProgressSubPath != SubPath_Travel)
+                _lastProgressSubPath = SubPath_Travel;
+            Travel::TravelResult travelResult = _worldTravel.Update(bot, movement,
+                active->targetPosition, deltaMs);
+            if (travelResult == Travel::TravelResult::Failed)
+                Finish(ActionOutcome::Blocked, _worldTravel.GetFailureReason());
             return;
         }
 
@@ -601,9 +608,8 @@ namespace Actions
         WanderObjectiveArea(bot, movement, blackboard, *active, qTemplate, searchRadius, deltaMs);
     }
 
-    void ProgressQuestAction::Stop(Player* /*bot*/, MovementManager* movement)
+    void ProgressQuestAction::Stop(Player* bot, MovementManager* movement)
     {
-        if (movement)
-            movement->Stop();
+        _worldTravel.Stop(bot, movement);
     }
 }

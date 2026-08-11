@@ -405,9 +405,6 @@ namespace Brain
                 break;
             if (_blacklistedQuests.find(completed.questId) != _blacklistedQuests.end())
                 continue;
-            if (completed.hasTurnInPosition && completed.turnInPosition.mapId != bot->GetMapId())
-                continue;
-
             Quest const* questTemplate = sObjectMgr->GetQuestTemplate(completed.questId);
             if (!Helper::QuestUtils::IsRewardBlockedByInventory(bot, questTemplate))
                 continue;
@@ -472,8 +469,6 @@ namespace Brain
             {
                 if (_blacklistedQuests.find(completed.questId) != _blacklistedQuests.end())
                     continue;
-                if (completed.hasTurnInPosition && completed.turnInPosition.mapId != bot->GetMapId())
-                    continue;
                 if (inventoryCleanupDeferred)
                 {
                     Quest const* questTemplate = sObjectMgr->GetQuestTemplate(completed.questId);
@@ -520,20 +515,20 @@ namespace Brain
         {
             if (_blacklistedQuests.find(q.questId) != _blacklistedQuests.end() ||
                 !isQuestSuitable(q.questId) ||
-                (q.hasTargetPosition && q.targetPosition.mapId != bot->GetMapId()) ||
                 HasInventoryBlockedItemObjective(bot, q))
             {
                 hasDeferredProgressionWork = true;
                 continue;
             }
             if (_blacklistedQuests.find(q.questId) == _blacklistedQuests.end() &&
-                (!q.hasTargetPosition || q.targetPosition.mapId == bot->GetMapId()) &&
                 !HasInventoryBlockedItemObjective(bot, q))
             {
-                float distanceSq = q.hasTargetPosition
-                    ? Helper::DistanceSq(q.targetPosition.x, q.targetPosition.y, q.targetPosition.z,
-                        _blackboard.self.x, _blackboard.self.y, _blackboard.self.z)
-                    : std::numeric_limits<float>::max() - 1.0f;
+                float distanceSq = !q.hasTargetPosition
+                    ? std::numeric_limits<float>::max() - 1.0f
+                    : (q.targetPosition.mapId == bot->GetMapId()
+                        ? Helper::DistanceSq(q.targetPosition.x, q.targetPosition.y, q.targetPosition.z,
+                            _blackboard.self.x, _blackboard.self.y, _blackboard.self.z)
+                        : std::numeric_limits<float>::max() / 2.0f);
                 if (q.questId == _activeQuestId)
                     distanceSq = -1.0f; // Preserve quest context across loot/rest/vendor interruptions.
                 if (!hasValidActiveQuest || distanceSq < selectedDistanceSq)
@@ -554,7 +549,7 @@ namespace Brain
         _activeQuestId = 0;
 
         // Priority 6: Accept another quest when no active quest is currently
-        // actionable. Suspended or cross-map quests must not monopolize the log.
+        // actionable. Suspended or unsuitable quests must not monopolize the log.
         if (!hasValidActiveQuest && !_blackboard.quest.availableQuests.empty())
         {
             for (const auto& available : _blackboard.quest.availableQuests)
@@ -566,8 +561,7 @@ namespace Brain
                     continue;
                 }
 
-                if (available.hasQuestGiverPosition &&
-                    available.questGiverPosition.mapId == bot->GetMapId())
+                if (available.hasQuestGiverPosition)
                 {
                     _activeQuestId = available.questId;
                     SetGoal(BotGoal::AcceptQuest);
@@ -631,11 +625,10 @@ namespace Brain
                 Helper::QuestUtils::IsRewardBlockedByInventory(bot, questTemplate);
             if (inventoryCleanupDeferred && candidate.rewardBlocked)
                 continue;
-            candidate.onCurrentMap = !completed.hasTurnInPosition ||
-                completed.turnInPosition.mapId == bot->GetMapId();
+            candidate.reachable = completed.hasTurnInPosition;
             candidate.hasKnownPosition = completed.hasTurnInPosition;
             hasBlockedReward = hasBlockedReward ||
-                (candidate.rewardBlocked && candidate.onCurrentMap && candidate.hasKnownPosition);
+                (candidate.rewardBlocked && candidate.reachable && candidate.hasKnownPosition);
             input.completedQuests.push_back(candidate);
         }
 
@@ -659,9 +652,10 @@ namespace Brain
                 });
             if (completed != _blackboard.quest.completedQuests.end() && completed->hasTurnInPosition)
             {
-                candidate.distanceFromTownSq = Helper::DistanceSq(
-                    completed->turnInPosition.x, completed->turnInPosition.y, completed->turnInPosition.z,
-                    originX, originY, originZ);
+                candidate.distanceFromTownSq = completed->turnInPosition.mapId == bot->GetMapId()
+                    ? Helper::DistanceSq(completed->turnInPosition.x, completed->turnInPosition.y,
+                        completed->turnInPosition.z, originX, originY, originZ)
+                    : std::numeric_limits<float>::max() / 2.0f;
             }
         }
 
