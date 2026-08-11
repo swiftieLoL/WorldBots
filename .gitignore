@@ -1,0 +1,71 @@
+# Build output
+/livescripts/build/
+/build/
+/out/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+
+# C/C++ compiler output
+*.d
+*.o
+*.obj
+*.gch
+*.pch
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exp
+*.ilk
+*.pdb
+*.idb
+*.exe
+*.out
+*.app
+
+# Visual Studio generated files
+.vs/
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# TypeScript / Node.js
+node_modules/
+*.tsbuildinfo
+coverage/
+
+# Local configuration and secrets
+/config/worldbots.conf
+.env
+.env.*
+!.env.example
+
+# Logs, crashes, and temporary files
+*.log
+log.txt
+*.stackdump
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# Editors
+.idea/
+.vscode/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini

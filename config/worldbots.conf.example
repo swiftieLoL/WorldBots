@@ -1,0 +1,71 @@
+[worldserver]
+
+# Core runtime
+WorldBots.Enable = 1
+WorldBots.BotCount = 3
+WorldBots.MaxBotCount = 2000
+WorldBots.DebugMode = 1
+WorldBots.VerboseLogging = 0
+
+# Dedicated mode creates one isolated, module-owned account per bot. This is
+# the safe default for concurrent bots and prevents characters being created
+# on a player's account. "shared" retains the old single-account behavior.
+WorldBots.AccountMode = dedicated
+WorldBots.AccountPrefix = WBOT
+WorldBots.AutoCreateAccounts = 1
+WorldBots.MigrateLegacyCharacters = 1
+
+# Used only by shared mode and as the explicitly authorized source account
+# when migrating old Botharry-style characters into dedicated accounts.
+WorldBots.AccountId = 1
+WorldBots.SaveBotProgress = 1
+WorldBots.PersistentBotPercent = 100
+
+# Equip empty bag slots on new and existing managed bots. Item 41599 is the
+# 20-slot Frostweave Bag. Existing populated bags are never replaced.
+WorldBots.StarterBagItemId = 41599
+WorldBots.StarterBagCount = 4
+
+# Defer quests above the solo difficulty ceiling. When no safe quest is
+# actionable—or a quest repeatedly kills/stalls a bot—hunt normal enemies in
+# this level band and retry the failed quest after gaining one level.
+WorldBots.GrindFallback.Enable = 1
+WorldBots.QuestMaxLevelsAboveBot = 1
+WorldBots.GrindMinLevelOffset = -3
+WorldBots.GrindMaxLevelOffset = 0
+
+# Enables development-only .bot test and .bot trace commands.
+# Keep disabled on normal realms.
+WorldBots.Tests.Enable = 0
+
+# Staggered bot login delays, in milliseconds
+WorldBots.BaseSpawnDelayMs = 1000
+WorldBots.SpawnDelayStepMs = 250
+
+# Limits synchronous account/character preparation work per 100ms factory
+# tick. Raise carefully when the database has ample headroom.
+WorldBots.FactoryOpsPerTick = 1
+
+# Bound database-heavy character login pipelines and retry transient failures.
+# These defaults favor stability during 2,000-bot scale tests.
+WorldBots.MaxConcurrentLogins = 8
+WorldBots.LoginTimeoutMs = 120000
+WorldBots.LoginMaxRetries = 5
+WorldBots.LoginRetryInitialDelayMs = 5000
+WorldBots.LoginRetryMaxDelayMs = 60000
+
+# Spread persistence work across small batches instead of saving every active
+# character on the same server tick.
+WorldBots.SaveBatchSize = 10
+WorldBots.SaveBatchIntervalMs = 500
+WorldBots.SaveBotIntervalMs = 30000
+
+# Defaults used when creating managed bot characters
+WorldBots.DefaultRace = 1
+WorldBots.DefaultClass = 1
+WorldBots.DefaultGender = 0
+
+# Optional repeating mixed-roster pattern:
+# race:class:gender:profile where profile is balanced, cautious, questing, or
+# stress. Leave blank to use the defaults above for every slot.
+WorldBots.Roster = 1:1:0:cautious,1:8:1:questing,3:3:0:balanced,1:5:1:cautious
