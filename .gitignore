@@ -69,3 +69,4 @@ log.txt
 .DS_Store
 Thumbs.db
 Desktop.ini
+*.md

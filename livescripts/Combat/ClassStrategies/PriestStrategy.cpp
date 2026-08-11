@@ -22,17 +22,11 @@ namespace Combat
 
         uint8_t healthPct = blackboard.self.healthPct;
 
-        static const uint32_t shieldSpells[] = { 48066, 48065, 25218, 10901, 10900, 10899, 10898, 6066, 6065, 3747, 600, 17 };
-        static const uint32_t flashHealSpells[] = { 48071, 48070, 25235, 10917, 10916, 10915, 9407, 2061 };
-        static const uint32_t swpSpells[] = { 48125, 48123, 25368, 10894, 10893, 10892, 970, 589 };
-        static const uint32_t smiteSpells[] = { 48123, 48122, 25364, 10934, 10933, 984, 606, 585 };
-
         // 1. Emergency Self Healing Priority
         if (healthPct < 50 && _cooldownTimer.IsReady())
         {
-            uint32_t shieldToCast = Helper::SpellUtils::FindKnownSpell(bot, shieldSpells);
-
-            bool hasShield = Helper::SpellUtils::HasAnyAura(bot, shieldSpells);
+            uint32_t shieldToCast = Helper::SpellUtils::FindReadyRank(bot, 17);
+            bool hasShield = Helper::SpellUtils::HasAuraInChain(bot, 17);
 
             if (shieldToCast != 0 && !hasShield && !bot->HasAura(6788)) // Weakened Soul
             {
@@ -43,7 +37,7 @@ namespace Combat
                 return;
             }
 
-            uint32_t healSpell = Helper::SpellUtils::FindReadySpell(bot, flashHealSpells);
+            uint32_t healSpell = Helper::SpellUtils::FindReadyRank(bot, 2061);
 
             if (healSpell != 0)
             {
@@ -64,9 +58,8 @@ namespace Combat
         if (bot->IsNonMeleeSpellCast(false) || !_cooldownTimer.IsReady()) return;
 
         // 2. Shadow Word: Pain dot maintenance
-        uint32_t swpToCast = Helper::SpellUtils::FindKnownSpell(bot, swpSpells);
-
-        bool hasSwp = Helper::SpellUtils::HasAnyAura(target, swpSpells);
+        uint32_t swpToCast = Helper::SpellUtils::FindReadyRank(bot, 589);
+        bool hasSwp = Helper::SpellUtils::HasAuraInChain(target, 589);
 
         if (swpToCast != 0 && !hasSwp)
         {
@@ -79,7 +72,7 @@ namespace Combat
         }
 
         // 3. Smite nuke
-        uint32_t smiteToCast = Helper::SpellUtils::FindReadySpell(bot, smiteSpells);
+        uint32_t smiteToCast = Helper::SpellUtils::FindReadyRank(bot, 585);
 
         if (smiteToCast != 0)
         {

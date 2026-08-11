@@ -57,7 +57,7 @@ namespace Combat
                 return;
             }
             if (_decisionTimer.IsReady() &&
-                ClassStrategyUtils::TryCastRank(bot, target, 781, StrategyName, "Disengage"))
+                ClassStrategyUtils::TryCastRank(bot, bot, 781, StrategyName, "Disengage"))
             {
                 _decisionTimer.Set(1000);
                 return;

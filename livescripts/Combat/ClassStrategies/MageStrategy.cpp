@@ -29,8 +29,7 @@ namespace Combat
         // Defensive Frost Nova if target gets closer than 8 yards
         if (dist <= 8.0f && _cooldownTimer.IsReady())
         {
-            static const uint32_t frostNovaSpells[] = { 42917, 27088, 10230, 8658, 6131, 865, 122 };
-            uint32_t novaToCast = Helper::SpellUtils::FindReadySpell(bot, frostNovaSpells);
+            uint32_t novaToCast = Helper::SpellUtils::FindReadyRank(bot, 122);
 
             if (novaToCast != 0)
             {
@@ -46,17 +45,12 @@ namespace Combat
 
         if (bot->IsNonMeleeSpellCast(false) || !_cooldownTimer.IsReady()) return;
 
-        // Primary Spell Nuke: Multi-rank Frostbolt or Fireball lookup
-        static const uint32_t frostboltSpells[] = { 42842, 42841, 38697, 27072, 27071, 10181, 10180, 10179, 8408, 8407, 8406, 7322, 205, 168, 116 };
-        static const uint32_t fireballSpells[] = { 42833, 42832, 38692, 27070, 10151, 10150, 10149, 8402, 8401, 8400, 3115, 145, 143, 133 };
-
-        uint32_t spellToCast = Helper::SpellUtils::FindKnownSpell(bot, frostboltSpells);
+        // Prefer the highest known Frostbolt rank, then fall back to Fireball.
+        uint32_t spellToCast = Helper::SpellUtils::FindReadyRank(bot, 116);
         if (spellToCast == 0)
-        {
-            spellToCast = Helper::SpellUtils::FindKnownSpell(bot, fireballSpells);
-        }
+            spellToCast = Helper::SpellUtils::FindReadyRank(bot, 133);
 
-        if (spellToCast != 0 && Helper::SpellUtils::IsSpellReady(bot, spellToCast))
+        if (spellToCast != 0)
         {
             std::string targetName = target->GetName();
             bot->CastSpell(target, spellToCast, false);

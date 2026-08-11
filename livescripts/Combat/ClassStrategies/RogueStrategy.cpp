@@ -20,12 +20,12 @@ namespace Combat
         { _decisionTimer.Set(500); return; }
 
         uint8_t comboPoints = bot->GetComboPoints(target);
-        if (comboPoints >= 3 &&
+        if (comboPoints >= 4 &&
             ClassStrategyUtils::TryCastRank(bot, target, 2098, "Rogue", "Eviscerate"))
         { _decisionTimer.Set(700); return; }
 
-        if (!Helper::SpellUtils::HasAuraInChain(target, 703) &&
-            ClassStrategyUtils::TryCastRank(bot, target, 703, "Rogue", "Garrote"))
+        if (comboPoints >= 2 && !Helper::SpellUtils::HasAuraInChain(target, 1943) &&
+            ClassStrategyUtils::TryCastRank(bot, target, 1943, "Rogue", "Rupture"))
         { _decisionTimer.Set(700); return; }
 
         if (ClassStrategyUtils::TryCastRank(bot, target, 1752, "Rogue", "Sinister Strike"))

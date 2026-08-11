@@ -455,6 +455,18 @@ namespace Cache
         return FindLocationFromMap(s_npcLocations, entry, outX, outY, outZ, outMapId, nearX, nearY, nearZ, nearMapId);
     }
 
+    std::vector<PositionInfo> BotCache::GetGameObjectLocations(uint32_t entry)
+    {
+        if (!s_isInitialized)
+            Initialize();
+
+        std::vector<PositionInfo> locations;
+        auto range = s_goLocations.equal_range(entry);
+        for (auto it = range.first; it != range.second; ++it)
+            locations.push_back(it->second);
+        return locations;
+    }
+
     bool BotCache::FindNpcLocationByName(const char* name, float& outX, float& outY, float& outZ, uint32_t& outMapId, float nearX, float nearY, float nearZ)
     {
         if (!name || !*name)

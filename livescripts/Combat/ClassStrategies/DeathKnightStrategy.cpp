@@ -32,8 +32,15 @@ namespace Combat
             ClassStrategyUtils::TryCastRank(bot, target, 49998, "Death Knight", "Death Strike"))
         { _decisionTimer.Set(800); return; }
 
-        static constexpr uint32_t priority[] = { 45477, 45462, 45902, 47541 };
-        static constexpr const char* names[] = { "Icy Touch", "Plague Strike", "Blood Strike", "Death Coil" };
+        if (!target->HasAura(55095, bot->GetGUID()) &&
+            ClassStrategyUtils::TryCastRank(bot, target, 45477, "Death Knight", "Icy Touch"))
+        { _decisionTimer.Set(700); return; }
+        if (!target->HasAura(55078, bot->GetGUID()) &&
+            ClassStrategyUtils::TryCastRank(bot, target, 45462, "Death Knight", "Plague Strike"))
+        { _decisionTimer.Set(700); return; }
+
+        static constexpr uint32_t priority[] = { 45902, 47541 };
+        static constexpr const char* names[] = { "Blood Strike", "Death Coil" };
         for (size_t i = 0; i < std::size(priority); ++i)
             if (ClassStrategyUtils::TryCastRank(bot, target, priority[i], "Death Knight", names[i]))
             { _decisionTimer.Set(700); return; }

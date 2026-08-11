@@ -51,6 +51,7 @@ namespace Cache
         static bool FindNpcLocation(uint32_t entry, float& outX, float& outY, float& outZ, uint32_t& outMapId, float nearX = 0.0f, float nearY = 0.0f, float nearZ = 0.0f, uint32_t nearMapId = std::numeric_limits<uint32_t>::max());
         static bool FindNpcLocationByName(const char* name, float& outX, float& outY, float& outZ, uint32_t& outMapId, float nearX = 0.0f, float nearY = 0.0f, float nearZ = 0.0f);
         static bool FindGameObjectLocation(uint32_t entry, float& outX, float& outY, float& outZ, uint32_t& outMapId, float nearX = 0.0f, float nearY = 0.0f, float nearZ = 0.0f, uint32_t nearMapId = std::numeric_limits<uint32_t>::max());
+        static std::vector<PositionInfo> GetGameObjectLocations(uint32_t entry);
         static bool FindNearestVendor(uint32_t mapId, float botX, float botY, float botZ,
             bool requireVendor, bool requireRepair, uint32_t& outVendorEntry, PositionInfo& outPos);
         static bool SuppressVendorLocation(uint32_t entry, uint32_t mapId, float x, float y, float z);
