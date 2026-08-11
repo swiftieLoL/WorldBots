@@ -2,6 +2,10 @@
 /livescripts/build/
 /build/
 /out/
+/.agents/
+/.gemini/
+/tests/
+/docs/
 /cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
