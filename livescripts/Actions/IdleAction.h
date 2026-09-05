@@ -1,16 +1,17 @@
 #pragma once
 
-#include "BotAction.h"
+#include "BaseBotAction.h"
 
 namespace Actions
 {
-    class IdleAction : public BotAction
+    class IdleAction : public BaseBotAction
     {
     public:
         const char* GetName() const override { return "IdleAction"; }
 
         void Start(Player* /*bot*/, MovementManager* movement) override
         {
+            ResetOutcome();
             if (movement)
             {
                 movement->Stop();
@@ -23,11 +24,6 @@ namespace Actions
 
         void Stop(Player* /*bot*/, MovementManager* /*movement*/) override
         {
-        }
-
-        bool IsComplete() const override
-        {
-            return false;
         }
     };
 }

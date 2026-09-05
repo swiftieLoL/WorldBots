@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Globals/ObjectMgr.h"
 #include "Player.h"
 #include "Item.h"
 #include "ItemTemplate.h"
@@ -9,30 +10,8 @@
 
 namespace Helper
 {
-    enum class InventoryItemDisposition : uint8_t
-    {
-        SellPoor,
-        SellCommon,
-        SellSurplusEquipment,
-        SellSurplusFood,
-        SellSurplusDrink,
-        DiscardPoorNoValue,
-        ProtectHearthstone,
-        ProtectActiveQuest,
-        ProtectNoSellValue,
-        ProtectConsumable,
-        ProtectFoodReserve,
-        ProtectDrinkReserve,
-        ProtectQuestClass,
-        ProtectHighQuality,
-        ProtectWhileBagsHealthy,
-        ProtectByPolicy,
-        Invalid
-    };
-
     struct InventoryItemDecision
     {
-        InventoryItemDisposition disposition = InventoryItemDisposition::Invalid;
         bool sell = false;
         bool discardWhenFull = false;
         const char* reason = "invalid item";
@@ -45,6 +24,16 @@ namespace Helper
         Drink,
         FoodAndDrink
     };
+
+    constexpr bool ProvidesFood(RecoveryConsumableRole role) noexcept
+    {
+        return role == RecoveryConsumableRole::Food || role == RecoveryConsumableRole::FoodAndDrink;
+    }
+
+    constexpr bool ProvidesDrink(RecoveryConsumableRole role) noexcept
+    {
+        return role == RecoveryConsumableRole::Drink || role == RecoveryConsumableRole::FoodAndDrink;
+    }
 
     struct InventoryPolicyContext
     {
@@ -102,7 +91,11 @@ namespace Helper
             for (uint8_t i = INVENTORY_SLOT_BAG_START; i < INVENTORY_SLOT_BAG_END; ++i)
             {
                 if (Bag* bag = bot->GetBagByPos(i))
-                    freeSlots += bag->GetFreeSlots();
+                {
+                    ItemTemplate const* proto = bag->GetTemplate();
+                    if (proto && proto->BagFamily == 0)
+                        freeSlots += bag->GetFreeSlots();
+                }
             }
 
             return freeSlots;
@@ -115,7 +108,6 @@ namespace Helper
         static RecoveryConsumableRole GetRecoveryConsumableRole(ItemTemplate const* proto);
         static InventoryItemDecision ClassifyForSpace(Player* bot, Item* item,
             InventoryPolicyContext const& context);
-        static bool IsMandatoryInventoryItem(Player* bot, ItemTemplate const* proto);
         static bool IsSellableForSpace(Player* bot, Item* item,
             InventoryPolicyContext const& context);
 

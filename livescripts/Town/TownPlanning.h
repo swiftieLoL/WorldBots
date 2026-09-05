@@ -9,6 +9,7 @@ namespace Town
     {
         Sell,
         Repair,
+        Restock,
         CreateRewardSpace,
         TurnInQuest
     };
@@ -17,9 +18,12 @@ namespace Town
     {
         uint32_t questId = 0;
         bool rewardBlocked = false;
-        bool reachable = false;
         bool hasKnownPosition = false;
         float distanceFromTownSq = 0.0f;
+        // The periodic blackboard can briefly retain a completed quest after
+        // RewardQuest has removed it from the live player state. Exclude that
+        // stale row so TownRun cannot repeatedly report no-op successes.
+        bool liveRewardable = true;
     };
 
     struct PlanningInput
@@ -28,8 +32,12 @@ namespace Town
         uint32_t rewardReserveSlots = 5;
         bool hasSellableItems = false;
         bool needsInventoryCleanup = false;
+        bool hasQuestItemCapacityBlock = false;
         bool needsRepair = false;
-        bool hasUsableVendor = false;
+        bool needsRestock = false;
+        bool hasInventoryVendor = false;
+        bool hasRepairVendor = false;
+        bool hasRestockVendor = false;
         std::vector<QuestTurnInCandidate> completedQuests;
     };
 
@@ -52,20 +60,12 @@ namespace Town
         bool RequiresVendorVisit() const;
     };
 
-    Plan BuildPlan(const PlanningInput& input);
-
-    enum class VerificationResult : uint8_t
+    inline bool ShouldExecute(const Plan& plan)
     {
-        Succeeded,
-        RetryableFailure,
-        Blocked
-    };
+        return !plan.Empty() || plan.blockedByMissingVendor ||
+            plan.blockedByProtectedInventory;
+    }
 
-    VerificationResult VerifyInventoryService(
-        Service service,
-        uint32_t freeSlotsBefore,
-        uint32_t freeSlotsAfter,
-        uint8_t durabilityBefore,
-        uint8_t durabilityAfter,
-        bool stillNeedsRepair);
+    Plan BuildPlan(const PlanningInput& input);
+    const char* DescribePrimaryPurpose(const Plan& plan);
 }

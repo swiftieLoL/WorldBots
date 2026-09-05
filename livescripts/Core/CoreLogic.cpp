@@ -1,24 +1,28 @@
 #include "Globals/ObjectMgr.h"
 #include "CoreLogic.h"
 #include "Auth/BotAuth.h"
+#include "Auth/BotLoginPolicy.h"
 #include "Factory/BotFactory.h"
 #include "Config/BotConfig.h"
 #include "Helper/MovementManager.h"
-#include "Helper/NpcFinder.h"
 #include "Helper/InventoryUtils.h"
-#include "Helper/MathUtils.h"
-#include "Helper/QuestUtils.h"
 #include "Helper/TeleportUtils.h"
+#include "Helper/BotMaintenance.h"
 #include "Actions/LootAction.h"
+#include "Actions/QuestAction.h"
+#include "Actions/UnstuckAction.h"
+#include "Sense/SenseCoordinator.h"
 #include "Scheduler/Scheduler.h"
 #include "Brain/BotBrain.h"
+#include "Brain/GoalTier.h"
 #include "Cache/BotCache.h"
-#include "Testing/ScenarioRunner.h"
 #include "Diagnostics/BotTrace.h"
+#include "Diagnostics/ProgressMonitor.h"
+#include "Diagnostics/StructuredEventLog.h"
+#include "Diagnostics/SoakDigest.h"
+#include "Commands/BotDiagnostics.h"
+#include "Commands/BotCommands.h"
 #include "ObjectAccessor.h"
-#include "Globals/ObjectMgr.h"
-#include "Item.h"
-#include "Creature.h"
 #include "Cache/CharacterCache.h"
 #include "World.h"
 #include "Log.h"
@@ -29,21 +33,46 @@
 #include <algorithm>
 #include <memory>
 #include <unordered_map>
-#include <cstdio>
-#include <cctype>
 #include <chrono>
-#include <sstream>
+#include <limits>
 
 struct BotRuntime
 {
     std::unique_ptr<MovementManager> movement;
     std::unique_ptr<Brain::BotBrain> brain;
+    uint64_t lastSenseClockMs = 0;
+    uint64_t lastThinkClockMs = 0;
+    uint64_t lastActionClockMs = 0;
+    uint8_t lastLearnedLevel = 0;
+    uint8_t lastProgressionLevel = 0;
+    bool hunterPetProvisionAttempted = false;
+};
+
+struct RuntimeTaskMetrics
+{
+    uint64_t deferredBots = 0;
+    uint64_t lastMicros = 0;
+    uint64_t maxMicros = 0;
+    uint32_t lastBatch = 0;
 };
 
 static std::unordered_map<ObjectGuid, BotRuntime> s_botRuntimes;
 static std::unordered_map<ObjectGuid, std::chrono::steady_clock::time_point> s_invalidBotSince;
+static std::unordered_map<ObjectGuid, uint32_t> s_lifecycleRecoveryAttempts;
 static std::unordered_map<ObjectGuid, std::chrono::steady_clock::time_point> s_lastBotSave;
 static std::deque<ObjectGuid> s_saveQueue;
+static std::vector<ObjectGuid> s_runtimeOrder;
+static size_t s_senseCursor = 0;
+static size_t s_thinkCursor = 0;
+static size_t s_actionCursor = 0;
+static size_t s_maintenanceCursor = 0;
+static uint64_t s_senseClockMs = 0;
+static uint64_t s_thinkClockMs = 0;
+static uint64_t s_actionClockMs = 0;
+static RuntimeTaskMetrics s_senseMetrics;
+static RuntimeTaskMetrics s_thinkMetrics;
+static RuntimeTaskMetrics s_actionMetrics;
+static RuntimeTaskMetrics s_maintenanceMetrics;
 static constexpr std::chrono::seconds BotLifecycleGracePeriod{ 30 };
 static bool s_debugMode = false;
 static bool s_verboseLogging = false;
@@ -51,45 +80,115 @@ static bool s_runtimeEnabled = false;
 
 static Framework::Scheduler s_scheduler;
 
+static Diagnostics::LogMode ResolveLoggingMode(bool verboseOverride)
+{
+    if (verboseOverride)
+        return Diagnostics::LogMode::Verbose;
+
+    std::string mode = Config::BotConfig::GetLoggingMode();
+    if (mode == "normal")
+        return Diagnostics::LogMode::Normal;
+    if (mode == "verbose")
+        return Diagnostics::LogMode::Verbose;
+    return Diagnostics::LogMode::Important;
+}
+
 static std::string EmitBotStatus(std::string status)
 {
     TC_LOG_INFO("server", "[WorldBots] [Status]\n{}", status);
     return status;
 }
 
-static const char* QuestObjectiveTypeName(Blackboard::QuestObjectiveType type)
+static uint32_t ConsumeElapsed(uint64_t clockMs, uint64_t& previousClockMs)
 {
-    switch (type)
-    {
-        case Blackboard::QuestObjectiveType::KillCreature: return "KillCreature";
-        case Blackboard::QuestObjectiveType::CollectItem: return "CollectItem";
-        case Blackboard::QuestObjectiveType::TalkToCreature: return "Creature";
-        case Blackboard::QuestObjectiveType::CastOnCreature: return "CastOnCreature";
-        case Blackboard::QuestObjectiveType::InteractGameObject: return "InteractGameObject";
-        case Blackboard::QuestObjectiveType::Explore: return "Explore";
-        case Blackboard::QuestObjectiveType::Unsupported: return "Unsupported";
-        default: return "Unknown";
-    }
+    uint64_t elapsed = clockMs >= previousClockMs ? clockMs - previousClockMs : 0;
+    previousClockMs = clockMs;
+    return static_cast<uint32_t>(std::min<uint64_t>(elapsed, std::numeric_limits<uint32_t>::max()));
 }
 
-static const char* InventoryResultName(InventoryResult result)
+template <typename Callback>
+static void ProcessRuntimeBatch(size_t& cursor, RuntimeTaskMetrics& metrics, Callback&& callback)
 {
-    switch (result)
+    // Runtime callbacks can remove or reorder bots. Iterate a stable GUID
+    // snapshot so those mutations cannot invalidate the cursor or skip the
+    // element that shifted into the current slot.
+    const std::vector<ObjectGuid> runtimeOrderSnapshot = s_runtimeOrder;
+    const size_t total = runtimeOrderSnapshot.size();
+    if (total == 0)
     {
-        case EQUIP_ERR_OK: return "OK";
-        case EQUIP_ERR_INVENTORY_FULL: return "INVENTORY_FULL";
-        case EQUIP_ERR_CANT_CARRY_MORE_OF_THIS: return "CANT_CARRY_MORE";
-        case EQUIP_ERR_ITEM_CANT_STACK: return "ITEM_CANT_STACK";
-        default: return "OTHER";
+        cursor = 0;
+        return;
     }
+
+    cursor %= total;
+    const size_t batchLimit = std::min<size_t>(Config::BotConfig::GetRuntimeBotBatchSize(), total);
+    const auto started = std::chrono::steady_clock::now();
+    const auto budget = std::chrono::milliseconds(Config::BotConfig::GetRuntimeTaskBudgetMs());
+    uint32_t processed = 0;
+    size_t inspected = 0;
+
+    while (processed < batchLimit && inspected < total)
+    {
+        cursor %= total;
+        ObjectGuid guid = runtimeOrderSnapshot[cursor];
+        cursor = (cursor + 1) % total;
+        ++inspected;
+        auto runtime = s_botRuntimes.find(guid);
+        if (runtime != s_botRuntimes.end())
+        {
+            callback(guid, runtime->second);
+            ++processed;
+        }
+
+        if (processed > 0 && std::chrono::steady_clock::now() - started >= budget)
+            break;
+    }
+
+    uint64_t elapsedMicros = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - started).count());
+    metrics.lastBatch = processed;
+    metrics.lastMicros = elapsedMicros;
+    metrics.maxMicros = std::max(metrics.maxMicros, elapsedMicros);
+    if (processed < total)
+        metrics.deferredBots += total - processed;
+}
+
+
+static void AdjustCursorOnErase(size_t& cursor, size_t erasedIndex, size_t newTotal)
+{
+    if (newTotal == 0)
+        cursor = 0;
+    else if (erasedIndex < cursor)
+        cursor = (cursor - 1) % newTotal;
+    else
+        cursor %= newTotal;
 }
 
 static void StopBotRuntime(ObjectGuid guid)
 {
     s_invalidBotSince.erase(guid);
     s_lastBotSave.erase(guid);
+    s_lifecycleRecoveryAttempts.erase(guid);
     s_saveQueue.erase(std::remove(s_saveQueue.begin(), s_saveQueue.end(), guid), s_saveQueue.end());
+    Actions::LootAction::ClearBotState(guid);
+    Actions::AcceptQuestAction::ClearBotState(guid);
+    Actions::UnstuckAction::ClearBotState(guid);
     Diagnostics::BotTrace::SetEnabled(static_cast<uint32_t>(guid.GetCounter()), false);
+    Diagnostics::ProgressMonitor::Remove(static_cast<uint32_t>(guid.GetCounter()));
+    Diagnostics::SoakDigest::Remove(static_cast<uint32_t>(guid.GetCounter()));
+
+    auto orderIt = std::find(s_runtimeOrder.begin(), s_runtimeOrder.end(), guid);
+    if (orderIt != s_runtimeOrder.end())
+    {
+        size_t erasedIndex = std::distance(s_runtimeOrder.begin(), orderIt);
+        s_runtimeOrder.erase(orderIt);
+        size_t newTotal = s_runtimeOrder.size();
+        AdjustCursorOnErase(s_senseCursor, erasedIndex, newTotal);
+        AdjustCursorOnErase(s_thinkCursor, erasedIndex, newTotal);
+        AdjustCursorOnErase(s_actionCursor, erasedIndex, newTotal);
+        AdjustCursorOnErase(s_maintenanceCursor, erasedIndex, newTotal);
+    }
+
     auto runtimeIt = s_botRuntimes.find(guid);
     if (runtimeIt != s_botRuntimes.end())
     {
@@ -97,7 +196,7 @@ static void StopBotRuntime(ObjectGuid guid)
         if (runtime.brain)
             runtime.brain->Shutdown();
         if (runtime.movement)
-            runtime.movement->Stop();
+            runtime.movement->Shutdown();
         s_botRuntimes.erase(runtimeIt);
     }
 
@@ -115,23 +214,30 @@ static void ShutdownRuntime()
         if (runtime.brain)
             runtime.brain->Shutdown();
         if (runtime.movement)
-            runtime.movement->Stop();
+            runtime.movement->Shutdown();
     }
 
+    // BotAuth is the session ownership boundary. It logs out and destroys
+    // module-owned socketless sessions while merely detaching adopted sessions
+    // that belong to the world/session manager.
     for (const auto& [guid, runtime] : s_botRuntimes)
-    {
-        if (Player* bot = ObjectAccessor::FindPlayer(guid))
-        {
-            if (WorldSession* session = bot->GetSession())
-                session->LogoutPlayer(true);
-        }
         BotAuth::RemoveBotSession(guid);
-    }
 
     s_botRuntimes.clear();
     s_invalidBotSince.clear();
     s_lastBotSave.clear();
     s_saveQueue.clear();
+    s_runtimeOrder.clear();
+    Actions::LootAction::ClearAllState();
+    Actions::AcceptQuestAction::ClearAllState();
+    Actions::UnstuckAction::ClearAllState();
+    Sense::SenseCoordinator::ClearSharedCaches();
+    Diagnostics::ProgressMonitor::Reset();
+    Diagnostics::StructuredEventLog::Reset();
+    Diagnostics::SoakDigest::Clear();
+    Diagnostics::BotTrace::CloseFileLog();
+    s_senseCursor = s_thinkCursor = s_actionCursor = s_maintenanceCursor = 0;
+    s_lifecycleRecoveryAttempts.clear();
     Diagnostics::BotTrace::Clear();
 }
 
@@ -140,11 +246,19 @@ static void RegisterActiveBot(Player* botPlayer)
     if (!botPlayer || !botPlayer->IsInWorld())
         return;
 
+    if (!Config::BotConfig::IsBotClassAllowed(botPlayer->GetClass()))
+    {
+        TC_LOG_WARN("server", "[WorldBots] [Lifecycle] Refusing to run disabled-class bot '{}' (class {}); the managed session will be closed.",
+            botPlayer->GetName(), static_cast<uint32_t>(botPlayer->GetClass()));
+        StopBotRuntime(botPlayer->GetGUID());
+        return;
+    }
+
     ObjectGuid guid = botPlayer->GetGUID();
     auto existing = s_botRuntimes.find(guid);
     if (existing != s_botRuntimes.end())
     {
-        if (existing->second.brain && existing->second.brain->GetBot() == botPlayer)
+        if (existing->second.brain && existing->second.brain->GetBotGuid() == guid)
             return;
 
         StopBotRuntime(guid);
@@ -160,7 +274,9 @@ static void RegisterActiveBot(Player* botPlayer)
     Factory::BotDefinition definition = Factory::BotFactory::GetBotDefinition(botPlayer->GetName());
     auto brain = std::make_unique<Brain::BotBrain>(botPlayer, manager.get(), definition.profile);
 
-    s_botRuntimes.emplace(guid, BotRuntime{ std::move(manager), std::move(brain) });
+    s_botRuntimes.emplace(guid, BotRuntime{ std::move(manager), std::move(brain),
+        s_senseClockMs, s_thinkClockMs, s_actionClockMs });
+    s_runtimeOrder.push_back(guid);
     s_lastBotSave[guid] = std::chrono::steady_clock::now();
     s_saveQueue.push_back(guid);
 }
@@ -181,8 +297,11 @@ static void ProcessPendingAuthSessions(uint32_t diff)
         {
             if (!botPlayer || !botPlayer->IsInWorld()) return;
 
-            TC_LOG_INFO("server", "[WorldBots] [Core] Bot '{}' (GUID: {}) successfully logged into the world at Map {}!",
-                botPlayer->GetName(), botPlayer->GetGUID().GetCounter(), botPlayer->GetMapId());
+            if (Diagnostics::BotTrace::ShouldLog(botPlayer, Diagnostics::LogEvent::Normal))
+            {
+                TC_LOG_INFO("server", "[WorldBots] [Core] Bot '{}' (GUID: {}) successfully logged into the world at Map {}!",
+                    botPlayer->GetName(), botPlayer->GetGUID().GetCounter(), botPlayer->GetMapId());
+            }
 
             RegisterActiveBot(botPlayer);
         },
@@ -200,8 +319,14 @@ static void PruneInvalidBots()
     for (const auto& [guid, runtime] : s_botRuntimes)
     {
         Player* bot = ObjectAccessor::FindPlayer(guid);
-        WorldSession* trackedSession = BotAuth::GetBotSession(guid);
-        Player* sessionPlayer = trackedSession ? trackedSession->GetPlayer() : nullptr;
+        BotAuth::SessionInfo sessionInfo = BotAuth::GetBotSessionInfo(guid);
+        WorldSession* trackedSession = sessionInfo.session;
+        BotAuth::SessionOwnership ownership = sessionInfo.ownership;
+        // Adopted sessions can be destroyed by their external owner. Do not
+        // dereference their cached raw session pointer after the player has
+        // disappeared from ObjectAccessor.
+        Player* sessionPlayer = ownership == BotAuth::SessionOwnership::Owned && trackedSession
+            ? trackedSession->GetPlayer() : bot;
         auto invalidIt = s_invalidBotSince.find(guid);
         // Actions normally complete their own server-side teleport. Make one
         // lifecycle recovery attempt when a pending transfer is first seen,
@@ -218,9 +343,14 @@ static void PruneInvalidBots()
         {
             if (invalidIt != s_invalidBotSince.end())
             {
-                TC_LOG_INFO("server", "[WorldBots] [Lifecycle] Bot '{}' (GUID: {}) returned to the world during lifecycle grace; preserving its session and brain",
-                    bot->GetName(), guid.GetCounter());
                 s_invalidBotSince.erase(invalidIt);
+                s_lifecycleRecoveryAttempts.erase(guid);
+                if (Diagnostics::BotTrace::ShouldLogGuid(static_cast<uint32_t>(guid.GetCounter()),
+                    Diagnostics::LogEvent::Normal))
+                {
+                    TC_LOG_INFO("server", "[WorldBots] [Lifecycle] Bot GUID {} returned to world; lifecycle grace cleared",
+                        guid.GetCounter());
+                }
             }
             continue;
         }
@@ -228,11 +358,15 @@ static void PruneInvalidBots()
         if (invalidIt == s_invalidBotSince.end())
         {
             s_invalidBotSince.emplace(guid, now);
-            TC_LOG_WARN("server", "[WorldBots] [Lifecycle] Bot GUID {} became temporarily unavailable (Accessor: {}, Session: {}, InWorld: {}, Teleporting: {}); allowing {} seconds for repop/teleport completion",
-                guid.GetCounter(), bot ? "Present" : "Missing", trackedSession ? "Present" : "Missing",
-                sessionPlayer && sessionPlayer->IsInWorld() ? "Yes" : "No",
-                sessionPlayer && sessionPlayer->IsBeingTeleported() ? "Yes" : "No",
-                BotLifecycleGracePeriod.count());
+            if (Diagnostics::BotTrace::ShouldLogGuid(static_cast<uint32_t>(guid.GetCounter()),
+                Diagnostics::LogEvent::Normal))
+            {
+                TC_LOG_WARN("server", "[WorldBots] [Lifecycle] Bot GUID {} became temporarily unavailable (Accessor: {}, Session: {}, InWorld: {}, Teleporting: {}); allowing {} seconds for repop/teleport completion",
+                    guid.GetCounter(), bot ? "Present" : "Missing", trackedSession ? "Present" : "Missing",
+                    sessionPlayer && sessionPlayer->IsInWorld() ? "Yes" : "No",
+                    sessionPlayer && sessionPlayer->IsBeingTeleported() ? "Yes" : "No",
+                    BotLifecycleGracePeriod.count());
+            }
             continue;
         }
 
@@ -242,56 +376,77 @@ static void PruneInvalidBots()
 
     for (const ObjectGuid& guid : recoveryGuids)
     {
+        BotAuth::SessionOwnership ownership = BotAuth::GetSessionOwnership(guid);
+        if (ownership == BotAuth::SessionOwnership::Adopted)
+        {
+            TC_LOG_WARN("server", "[WorldBots] [Lifecycle] Adopted bot GUID {} did not return during lifecycle grace; detaching its runtime without creating a competing session",
+                guid.GetCounter());
+            StopBotRuntime(guid);
+            s_lifecycleRecoveryAttempts.erase(guid);
+            continue;
+        }
+
+        uint32_t& attempts = s_lifecycleRecoveryAttempts[guid];
+        uint32_t maxRetries = Config::BotConfig::GetLoginMaxRetries();
+        if (attempts >= maxRetries)
+        {
+            TC_LOG_ERROR("server", "[WorldBots] [Lifecycle] Bot GUID {} exceeded max lifecycle recovery attempts ({}/{}); abandoning bot runtime.",
+                guid.GetCounter(), attempts, maxRetries);
+            s_lifecycleRecoveryAttempts.erase(guid);
+            StopBotRuntime(guid);
+            continue;
+        }
+
+        ++attempts;
+        uint32_t delayMs = BotAuth::CalculateRetryDelayMs(attempts, 2000, 30000);
         uint32_t accountId = sCharacterCache->GetCharacterAccountIdByGuid(guid);
         if (accountId == 0)
             accountId = Config::BotConfig::GetBotAccountId();
-        TC_LOG_ERROR("server", "[WorldBots] [Lifecycle] Bot GUID {} did not return during lifecycle grace; rebuilding its owned session and runtime",
-            guid.GetCounter());
+        TC_LOG_ERROR("server", "[WorldBots] [Lifecycle] Bot GUID {} did not return during lifecycle grace (attempt {}/{}); rebuilding session with {}ms delay",
+            guid.GetCounter(), attempts, maxRetries, delayMs);
         StopBotRuntime(guid);
-        Factory::BotFactory::QueueBotLogin(accountId, guid);
+        Factory::BotFactory::QueueBotLogin(accountId, guid, delayMs, attempts);
     }
 }
 
 static void ProcessSenseUpdates(uint32_t deltaMs)
 {
-    PruneInvalidBots();
-    for (auto& [guid, runtime] : s_botRuntimes)
-    {
+    s_senseClockMs += deltaMs;
+    ProcessRuntimeBatch(s_senseCursor, s_senseMetrics, [](ObjectGuid /*guid*/, BotRuntime& runtime) {
         if (runtime.brain)
-            runtime.brain->Sense(deltaMs);
-    }
+            runtime.brain->Sense(ConsumeElapsed(s_senseClockMs, runtime.lastSenseClockMs));
+    });
 }
 
 static void ProcessThinkUpdates(uint32_t deltaMs)
 {
-    PruneInvalidBots();
-    for (auto& [guid, runtime] : s_botRuntimes)
-    {
+    s_thinkClockMs += deltaMs;
+    ProcessRuntimeBatch(s_thinkCursor, s_thinkMetrics, [](ObjectGuid /*guid*/, BotRuntime& runtime) {
         if (runtime.brain)
-            runtime.brain->Think(deltaMs);
-    }
-}
-
-static void ProcessMovementUpdates(uint32_t diff)
-{
-    for (auto& [guid, runtime] : s_botRuntimes)
-    {
-        if (runtime.movement)
-            runtime.movement->Update(diff);
-    }
+            runtime.brain->Think(ConsumeElapsed(s_thinkClockMs, runtime.lastThinkClockMs));
+    });
 }
 
 static void ProcessActionUpdates(uint32_t deltaMs)
 {
-    PruneInvalidBots();
-    for (auto& [guid, runtime] : s_botRuntimes)
-    {
+    s_actionClockMs += deltaMs;
+    ProcessRuntimeBatch(s_actionCursor, s_actionMetrics, [](ObjectGuid guid, BotRuntime& runtime) {
+        uint32_t elapsed = ConsumeElapsed(s_actionClockMs, runtime.lastActionClockMs);
         if (runtime.brain)
-            runtime.brain->UpdateAction(deltaMs);
-    }
+            runtime.brain->UpdateAction(elapsed);
+        auto it = s_botRuntimes.find(guid);
+        if (it != s_botRuntimes.end() && it->second.movement)
+            it->second.movement->Update(elapsed);
+    });
+}
 
-    // Synchronized Movement Execution: Run movement manager update immediately after action tick
-    ProcessMovementUpdates(deltaMs);
+static void ProcessMaintenanceUpdates(uint32_t)
+{
+    ProcessRuntimeBatch(s_maintenanceCursor, s_maintenanceMetrics, [](ObjectGuid /*guid*/, BotRuntime& runtime) {
+        Player* bot = runtime.brain ? runtime.brain->GetBot() : nullptr;
+        Helper::BotMaintenance::Update(bot, runtime.lastLearnedLevel,
+            runtime.lastProgressionLevel, runtime.hunterPetProvisionAttempted);
+    });
 }
 
 static void ProcessDebugPositionLogging(uint32_t)
@@ -311,6 +466,125 @@ static void ProcessDebugPositionLogging(uint32_t)
     }
 }
 
+static void ProcessProgressDiagnostics()
+{
+    if (!Diagnostics::ProgressMonitor::IsEnabled())
+        return;
+
+    std::vector<Diagnostics::ProgressSample> samples;
+    samples.reserve(s_botRuntimes.size());
+    for (const auto& [guid, runtime] : s_botRuntimes)
+    {
+        Player* bot = runtime.brain ? runtime.brain->GetBot() : nullptr;
+        if (!bot || !bot->IsInWorld() || !runtime.movement)
+            continue;
+
+        const Brain::BotBrain& brain = *runtime.brain;
+        const Blackboard::BotBlackboard& bb = brain.GetBlackboard();
+        const Brain::TransitionMetrics& transitions = brain.GetTransitionMetrics();
+        Diagnostics::ProgressSample sample;
+        sample.guidLow = static_cast<uint32_t>(guid.GetCounter());
+        sample.name = bot->GetName();
+        sample.level = bot->GetLevel();
+        sample.xp = bot->GetUInt32Value(PLAYER_XP);
+        sample.nextLevelXp = bot->GetUInt32Value(PLAYER_NEXT_LEVEL_XP);
+        sample.profile = brain.GetBehaviorProfileName();
+        sample.goal = brain.GetGoalString();
+        sample.tier = Brain::GoalTierToString(brain.GetActiveTier());
+        sample.action = brain.GetActionString();
+        sample.outcome = brain.GetActionOutcomeReason();
+        sample.actionDetail = brain.GetActionDiagnosticDetail();
+        sample.actionElapsedMs = brain.GetActiveActionElapsedMs();
+        sample.actionIdleMs = brain.GetActiveActionIdleMs();
+        sample.travelMode = brain.GetWorldTravelModeName();
+        sample.travelWaitReason = brain.GetWorldTravelWaitReasonName();
+        sample.casting = bot->IsNonMeleeSpellCast(false);
+        sample.travelElapsedMs = brain.GetWorldTravelElapsedMs();
+        sample.travelStepElapsedMs = brain.GetWorldTravelStepElapsedMs();
+        sample.travelReplans = brain.GetWorldTravelReplanCount();
+        sample.travelStepIndex = brain.GetWorldTravelStepIndex();
+        sample.travelStepCount = brain.GetWorldTravelStepCount();
+        sample.activeQuestId = brain.GetActiveQuestId();
+        sample.watchdogQuestId = brain.GetQuestProgressWatchId();
+        sample.watchdogMs = brain.GetQuestProgressWatchElapsedMs();
+        sample.deathRecoverySeconds = brain.GetDeathRecoveryRemainingSeconds();
+        sample.mapId = bot->GetMapId();
+        sample.zoneId = bot->GetZoneId();
+        sample.areaId = bot->GetAreaId();
+        sample.x = bot->GetPositionX();
+        sample.y = bot->GetPositionY();
+        sample.z = bot->GetPositionZ();
+        sample.healthPct = bb.self.healthPct;
+        sample.manaPct = bb.self.manaPct;
+        sample.dead = !bot->IsAlive();
+        sample.inCombat = bot->IsInCombat();
+        sample.snapshotReady = bb.initialSnapshotReady;
+        sample.movement = runtime.movement->GetStateName();
+        sample.hasPath = runtime.movement->HasPath();
+        sample.pathFailure = runtime.movement->GetLastPathFailureName();
+        sample.pathFlags = runtime.movement->GetLastPathFlags();
+        sample.pathAttemptGeneration = runtime.movement->GetPathAttemptGeneration();
+        sample.pathEvidenceFresh = brain.HasFreshActionPathEvidence();
+        sample.originPathFailures = runtime.movement->GetOriginPathFailureCount();
+        sample.originPathDestinations =
+            runtime.movement->GetOriginPathFailureDestinationCount();
+        sample.originRecoveryRequired = runtime.movement->NeedsOriginPathRecovery();
+        sample.pathRequestX = runtime.movement->GetDestinationX();
+        sample.pathRequestY = runtime.movement->GetDestinationY();
+        sample.pathRequestZ = runtime.movement->GetDestinationZ();
+        sample.pathEndpointAvailable = runtime.movement->GetLastPathAttemptEndpoint(
+            sample.pathEndpointX, sample.pathEndpointY, sample.pathEndpointZ);
+        sample.externalControl = runtime.movement->GetExternalControlModeName();
+        sample.navStuck = bb.nav.isStuck;
+        sample.freeBagSlots = bb.inv.freeBagSlots;
+        sample.totalBagSlots = bb.inv.totalBagSlots;
+        sample.bagsFull = bb.inv.bagsFull;
+        sample.needsRepair = bb.inv.needsRepair;
+        sample.needsRestock = bb.inv.needsRestock;
+        sample.availableQuests = static_cast<uint32_t>(bb.quest.availableQuests.size());
+        sample.activeQuests = static_cast<uint32_t>(bb.quest.activeQuests.size());
+        sample.completedQuests = static_cast<uint32_t>(bb.quest.completedQuests.size());
+        sample.totalTransitions = transitions.totalTransitions;
+        sample.recentInterruptedTransitions = transitions.recentInterruptedTransitions;
+        sample.churning = transitions.IsChurning();
+        for (size_t i = 0; i < sample.soakTotals.size(); ++i)
+        {
+            sample.soakTotals[i] = Diagnostics::SoakDigest::GetTotal(
+                sample.guidLow, static_cast<Diagnostics::SoakEvent>(i));
+        }
+        samples.push_back(std::move(sample));
+    }
+
+    // Include configured slots that are absent from the runtime. Without
+    // these rows, a bot stuck in provisioning, login retry, or lifecycle
+    // recovery would disappear from the live file and look deceptively quiet.
+    for (uint32_t slot = 0; slot < Config::BotConfig::GetBotCount(); ++slot)
+    {
+        std::string name = Factory::BotFactory::NormalizeBotName(
+            Factory::BotFactory::GenerateBotName(slot));
+        ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(name);
+        if (guid && s_botRuntimes.find(guid) != s_botRuntimes.end())
+            continue;
+
+        Diagnostics::ProgressSample sample;
+        sample.guidLow = guid ? static_cast<uint32_t>(guid.GetCounter()) : 0;
+        sample.name = std::move(name);
+        sample.runtimeActive = false;
+        sample.level = guid ? sCharacterCache->GetCharacterLevelByGuid(guid) : 0;
+        sample.profile = Factory::BehaviorProfileName(
+            Factory::BotFactory::GetBotDefinition(sample.name).profile);
+        sample.goal = "Unavailable";
+        sample.tier = "Unavailable";
+        sample.action = "Unavailable";
+        sample.movement = "Unavailable";
+        sample.pathFailure = "Unavailable";
+        sample.externalControl = "None";
+        samples.push_back(std::move(sample));
+    }
+
+    Diagnostics::ProgressMonitor::WriteSnapshot(std::move(samples));
+}
+
 static void ProcessSaveUpdates(uint32_t)
 {
     if (!Config::BotConfig::ShouldSaveBotProgress() || s_saveQueue.empty())
@@ -318,8 +592,11 @@ static void ProcessSaveUpdates(uint32_t)
 
     auto now = std::chrono::steady_clock::now();
     uint32_t remaining = Config::BotConfig::GetSaveBatchSize();
-    while (remaining-- > 0 && !s_saveQueue.empty())
+    size_t inspected = 0;
+    size_t initialQueueSize = s_saveQueue.size();
+    while (remaining > 0 && inspected < initialQueueSize && !s_saveQueue.empty())
     {
+        ++inspected;
         ObjectGuid guid = s_saveQueue.front();
         s_saveQueue.pop_front();
 
@@ -330,17 +607,40 @@ static void ProcessSaveUpdates(uint32_t)
 
         if (now - lastSave->second < std::chrono::milliseconds(Config::BotConfig::GetSaveBotIntervalMs()))
         {
-            s_saveQueue.push_front(guid);
-            break;
+            s_saveQueue.push_back(guid);
+            continue;
         }
 
         Player* bot = ObjectAccessor::FindPlayer(guid);
-        if (bot && bot->IsInWorld())
+        if (bot && bot->IsInWorld() && !bot->IsBeingTeleported())
+        {
             bot->SaveToDB();
-
-        lastSave->second = now;
-        s_saveQueue.push_back(guid);
+            // Re-verify bot still exists in runtime after SaveToDB
+            auto saveIt = s_lastBotSave.find(guid);
+            if (saveIt != s_lastBotSave.end() && s_botRuntimes.find(guid) != s_botRuntimes.end())
+            {
+                saveIt->second = now;
+                --remaining;
+                s_saveQueue.push_back(guid);
+            }
+        }
+        else
+        {
+            // Teleporting or transiently unavailable: requeue without resetting save timestamp
+            if (s_botRuntimes.find(guid) != s_botRuntimes.end())
+                s_saveQueue.push_back(guid);
+        }
     }
+}
+
+static BotRuntime* FindRuntimeByName(const std::string& botName)
+{
+    std::string formattedName = Factory::BotFactory::NormalizeBotName(botName);
+    ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(formattedName);
+    if (!guid)
+        return nullptr;
+    auto runtime = s_botRuntimes.find(guid);
+    return runtime != s_botRuntimes.end() ? &runtime->second : nullptr;
 }
 
 namespace Core
@@ -349,6 +649,9 @@ namespace Core
     {
         if (!Config::BotConfig::LoadModuleRuntimeConfig())
         {
+            ShutdownRuntime();
+            s_scheduler.Clear();
+            s_runtimeEnabled = false;
             TC_LOG_ERROR("server", "[WorldBots] [Core] WorldBots initialization stopped because its module-local configuration could not be loaded.");
             return false;
         }
@@ -365,26 +668,57 @@ namespace Core
         InitializeBotFactory(
             Config::BotConfig::GetBotCount(),
             Config::BotConfig::IsDebugModeEnabled(),
-            Config::BotConfig::IsVerboseLoggingEnabled());
+            false);
         return true;
     }
 
     void CoreLogic::InitializeBotFactory(uint32_t botCount, bool debugMode, bool verboseLogging)
     {
-        Cache::BotCache::Initialize();
-
         s_debugMode = debugMode;
-        s_verboseLogging = verboseLogging;
-        Diagnostics::BotTrace::SetGlobalVerbose(verboseLogging);
+        Diagnostics::BotTrace::SetMode(ResolveLoggingMode(verboseLogging));
+        s_verboseLogging = Diagnostics::BotTrace::IsGlobalVerbose();
+
+        Cache::BotCache::Initialize();
 
         ShutdownRuntime();
         s_scheduler.Clear();
+        Diagnostics::SoakDigest::Clear();
+        Diagnostics::ProgressMonitor::Configure(
+            Config::BotConfig::IsProgressDiagnosticsEnabled(),
+            Config::BotConfig::GetProgressDiagnosticsDirectory(),
+            Config::BotConfig::GetProgressDiagnosticsStallSeconds());
+        Diagnostics::StructuredEventLog::Configure(
+            Config::BotConfig::IsStructuredEventDiagnosticsEnabled(),
+            Config::BotConfig::GetProgressDiagnosticsDirectory(),
+            Config::BotConfig::GetStructuredEventDiagnosticBots());
+        std::string fileLogLevel = Config::BotConfig::GetFileTraceLoggingLevel();
+        Diagnostics::LogMode fileMode = Diagnostics::LogMode::Verbose;
+        if (fileLogLevel == "important")
+            fileMode = Diagnostics::LogMode::Important;
+        else if (fileLogLevel == "normal")
+            fileMode = Diagnostics::LogMode::Normal;
+        Diagnostics::BotTrace::ConfigureFileLog(
+            Config::BotConfig::IsFileTraceLoggingEnabled(),
+            Config::BotConfig::GetProgressDiagnosticsDirectory(),
+            fileMode,
+            Config::BotConfig::GetFileTraceLoggingBots());
+        s_senseClockMs = s_thinkClockMs = s_actionClockMs = 0;
+        s_senseMetrics = {};
+        s_thinkMetrics = {};
+        s_actionMetrics = {};
+        s_maintenanceMetrics = {};
 
         // SpawnTask: 100ms interval (Lifecycle & Auth query processing)
         s_scheduler.RegisterTask(std::make_shared<Framework::ScheduledTask>(
             "SpawnTask", 100, [](uint32_t deltaMs) {
                 Factory::BotFactory::ProcessDeferredSpawns(deltaMs);
                 ProcessPendingAuthSessions(deltaMs);
+            }
+        ));
+
+        s_scheduler.RegisterTask(std::make_shared<Framework::ScheduledTask>(
+            "LifecycleTask", 500, [](uint32_t) {
+                PruneInvalidBots();
             }
         ));
 
@@ -411,6 +745,12 @@ namespace Core
             }
         ));
 
+        s_scheduler.RegisterTask(std::make_shared<Framework::ScheduledTask>(
+            "MaintenanceTask", 1000, [](uint32_t deltaMs) {
+                ProcessMaintenanceUpdates(deltaMs);
+            }
+        ));
+
         // DebugPositionTask: 2000ms interval (Position logging)
         s_scheduler.RegisterTask(std::make_shared<Framework::ScheduledTask>(
             "DebugPositionTask", 2000, [](uint32_t deltaMs) {
@@ -424,10 +764,26 @@ namespace Core
             }
         ));
 
-        if (s_verboseLogging)
+        // SoakDigest: 30-minute interval (periodic edge case summary)
+        s_scheduler.RegisterTask(std::make_shared<Framework::ScheduledTask>(
+            "SoakDigestTask", 1800000, [](uint32_t) {
+                Diagnostics::SoakDigest::EmitDigest();
+            }
+        ));
+
+        if (Diagnostics::ProgressMonitor::IsEnabled())
         {
-            TC_LOG_INFO("server", "[WorldBots] [Core] BotFactory initialized (BotCount: {}, DebugMode: {}, VerboseLogging: {})",
-                botCount, debugMode ? 1 : 0, verboseLogging ? 1 : 0);
+            s_scheduler.RegisterTask(std::make_shared<Framework::ScheduledTask>(
+                "ProgressDiagnosticsTask", Config::BotConfig::GetProgressDiagnosticsIntervalMs(), [](uint32_t) {
+                    ProcessProgressDiagnostics();
+                }
+            ));
+        }
+
+        if (Diagnostics::BotTrace::ShouldLog(nullptr, Diagnostics::LogEvent::Normal))
+        {
+            TC_LOG_INFO("server", "[WorldBots] [Core] BotFactory initialized (BotCount: {}, Logging: {}, PositionLogging: {})",
+                botCount, Diagnostics::BotTrace::GetModeName(), debugMode ? 1 : 0);
         }
 
         // Delegate bot character creation and cleanup to BotFactory
@@ -436,344 +792,69 @@ namespace Core
 
     std::string CoreLogic::GetBotStatus(std::string const& botName)
     {
-        std::string formattedName = Factory::BotFactory::NormalizeBotName(botName);
-
-        ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(formattedName);
-        if (!guid)
-        {
+        BotRuntime* runtime = FindRuntimeByName(botName);
+        if (!runtime)
             return EmitBotStatus("Bot '" + botName + "' not found in character cache.");
-        }
 
-        auto it = s_botRuntimes.find(guid);
-        if (it == s_botRuntimes.end() || !it->second.brain)
-        {
+        if (!runtime->brain)
             return EmitBotStatus("Bot '" + botName + "' has no active brain or is not in world.");
-        }
 
-        Brain::BotBrain* brain = it->second.brain.get();
-        Player* bot = brain->GetBot();
+        Player* bot = runtime->brain->GetBot();
         if (!bot || !bot->IsInWorld())
         {
-            auto lifecycleIt = s_invalidBotSince.find(guid);
-            if (lifecycleIt != s_invalidBotSince.end())
+            std::string formattedName = Factory::BotFactory::NormalizeBotName(botName);
+            ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(formattedName);
+            auto lifecycle = s_invalidBotSince.find(guid);
+            if (lifecycle != s_invalidBotSince.end())
             {
-                auto elapsed = std::chrono::steady_clock::now() - lifecycleIt->second;
+                auto elapsed = std::chrono::steady_clock::now() - lifecycle->second;
                 auto remaining = elapsed < BotLifecycleGracePeriod
-                    ? std::chrono::duration_cast<std::chrono::seconds>(BotLifecycleGracePeriod - elapsed).count()
-                    : 0;
+                    ? std::chrono::duration_cast<std::chrono::seconds>(BotLifecycleGracePeriod - elapsed).count() : 0;
                 return EmitBotStatus(fmt::format(
                     "[WorldBots Status] {}\n - Lifecycle: Temporarily unavailable during repop/teleport\n - Brain: Preserved\n - Recovery grace remaining: {}s",
                     formattedName, remaining));
             }
             return EmitBotStatus("Bot '" + botName + "' is not currently in world.");
         }
+        return Commands::BotDiagnostics::FormatBotStatus(runtime->brain.get(), runtime->movement.get());
+    }
 
-        const auto& bb = brain->GetBlackboard();
-        std::string goalStr = brain->GetGoalString();
-        std::string actionStr = brain->GetActionString();
-        std::string actionReason = brain->GetActionOutcomeReason();
-        bool explicitlyTraced = Diagnostics::BotTrace::IsEnabled(
-            static_cast<uint32_t>(bot->GetGUID().GetCounter()));
-        const char* traceStatus = explicitlyTraced ? "Enabled" :
-            (Diagnostics::BotTrace::IsGlobalVerbose() ? "Global verbose" : "Disabled");
-
-        MovementManager* movement = it->second.movement.get();
-        const char* movementState = movement ? movement->GetStateName() : "Unavailable";
-        const char* externalMode = movement ? movement->GetExternalControlModeName() : "Unavailable";
-        const char* hasPath = movement && movement->HasPath() ? "Yes" : "No";
-        std::string destination = movement && movement->HasPath()
-            ? fmt::format("({:.1f}, {:.1f}, {:.1f})", movement->GetDestinationX(),
-                movement->GetDestinationY(), movement->GetDestinationZ())
-            : "None";
-
-        return EmitBotStatus(fmt::format(
-            "[WorldBots Status] {} (Level {})\n"
-            " - Profile: {}\n"
-            " - Goal: {}\n"
-            " - Action: {}\n"
-            " - Quest Context: {}\n"
-            " - Last Action Detail: {}\n"
-            " - Trace: {}\n"
-            " - Movement: {} | Path: {} | External Control: {}\n"
-            " - Movement Destination: {}\n"
-            " - Blackboard Quests: Available: {} | Active: {} | Completed: {}\n"
-            " - Position: Map {} at ({:.1f}, {:.1f}, {:.1f})",
-            bot->GetName(), bot->GetLevel(),
-            brain->GetBehaviorProfileName(), goalStr, actionStr,
-            brain->GetActiveQuestId() != 0 ? std::to_string(brain->GetActiveQuestId()) : "None",
-            actionReason.empty() ? "Running / none" : actionReason,
-            traceStatus,
-            movementState, hasPath, externalMode,
-            destination,
-            bb.quest.availableQuests.size(), bb.quest.activeQuests.size(), bb.quest.completedQuests.size(),
-            bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()));
+    static Brain::BotBrain* FindBotBrainByName(std::string const& botName)
+    {
+        BotRuntime* runtime = FindRuntimeByName(botName);
+        return runtime ? runtime->brain.get() : nullptr;
     }
 
     std::string CoreLogic::GetBotVendorStatus(std::string const& botName)
     {
-        std::string formattedName = Factory::BotFactory::NormalizeBotName(botName);
-        ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(formattedName);
-        auto runtime = guid ? s_botRuntimes.find(guid) : s_botRuntimes.end();
-        if (!guid || runtime == s_botRuntimes.end() || !runtime->second.brain)
+        Brain::BotBrain* brain = FindBotBrainByName(botName);
+        if (!brain)
             return EmitBotStatus("Bot '" + botName + "' has no active brain or is not in world.");
-
-        Brain::BotBrain* brain = runtime->second.brain.get();
         Player* bot = brain->GetBot();
         if (!bot || !bot->IsInWorld())
             return EmitBotStatus("Bot '" + botName + "' is not currently in world.");
-
-        const auto& bb = brain->GetBlackboard();
-        Town::Plan plan = brain->PreviewTownPlan();
-        bool lowSpace = Helper::InventoryUtils::CountFreeBagSlots(bot) <= 3;
-        Helper::InventoryPolicyContext inventoryPolicy =
-            Helper::InventoryUtils::BuildPolicyContext(bot, lowSpace);
-        uint32_t sellableStacks = 0;
-        uint32_t discardableStacks = 0;
-        uint32_t protectedStacks = 0;
-        std::ostringstream items;
-
-        Helper::InventoryUtils::ForEachBagItem(bot, [&](uint8 bag, uint8 slot, Item* item) {
-            ItemTemplate const* proto = item ? item->GetTemplate() : nullptr;
-            Helper::InventoryItemDecision decision =
-                Helper::InventoryUtils::ClassifyForSpace(bot, item, inventoryPolicy);
-            sellableStacks += decision.sell ? 1u : 0u;
-            discardableStacks += decision.discardWhenFull ? 1u : 0u;
-            protectedStacks += !decision.sell && !decision.discardWhenFull ? 1u : 0u;
-            items << "\n   - Bag " << static_cast<uint32_t>(bag)
-                  << " Slot " << static_cast<uint32_t>(slot) << ": "
-                  << (proto ? proto->Name1 : "<unknown>")
-                  << " x" << (item ? item->GetCount() : 0)
-                  << " (Entry " << (proto ? proto->ItemId : 0)
-                  << ", Quality " << (proto ? static_cast<uint32_t>(proto->Quality) : 0)
-                  << ", Sell " << (proto ? proto->SellPrice : 0) << "c) -> "
-                  << decision.reason;
-            return true;
-        });
-
-        uint32_t freeSlots = Helper::InventoryUtils::CountFreeBagSlots(bot);
-        uint32_t projectedFreeSlots = freeSlots + sellableStacks + discardableStacks;
-        uint32_t requiredSlots = plan.targetFreeBagSlots;
-        if (requiredSlots == 0 && (bb.inv.bagsFull || Actions::LootAction::HasInventoryBlockedLoot(bot)))
-            requiredSlots = 1;
-
-        Creature* liveVendor = Helper::NpcUtils::FindNearbyServiceNpc(bot, true, false, 30.0f);
-        uint32_t cachedVendorEntry = bb.inv.nearestVendorEntry;
-        uint32_t vendorSuppression = cachedVendorEntry != 0
-            ? brain->GetNpcSuppressionRemainingSeconds(cachedVendorEntry) : 0;
-        std::string cachedVendor = cachedVendorEntry != 0
-            ? fmt::format("Entry {} at ({:.1f}, {:.1f}, {:.1f}) Map {} | Distance {:.1f}yd | Suppressed {}s",
-                cachedVendorEntry, bb.inv.vendorPosition.x, bb.inv.vendorPosition.y,
-                bb.inv.vendorPosition.z, bb.inv.vendorPosition.mapId,
-                Helper::Distance2D(bot->GetPositionX(), bot->GetPositionY(),
-                    bb.inv.vendorPosition.x, bb.inv.vendorPosition.y), vendorSuppression)
-            : "None";
-
-        std::ostringstream output;
-        output << "[WorldBots Vendor Status] " << bot->GetName() << '\n'
-               << " - Goal / Action: " << brain->GetGoalString() << " / " << brain->GetActionString() << '\n'
-               << " - Progression: Level " << static_cast<uint32_t>(bot->GetLevel())
-               << " | Quest ceiling +" << Config::BotConfig::GetQuestMaxLevelsAboveBot()
-               << " | Grind range " << Config::BotConfig::GetGrindMinLevelOffset()
-               << " to " << Config::BotConfig::GetGrindMaxLevelOffset()
-               << " | Retry quests at level "
-               << (brain->GetGrindUntilLevel() ? std::to_string(brain->GetGrindUntilLevel()) : "immediately") << '\n'
-               << " - Bag Slots: " << freeSlots << '/' << bb.inv.totalBagSlots
-               << " free | Low: " << (bb.inv.lowBagSpace ? "Yes" : "No")
-               << " | Full: " << (bb.inv.bagsFull ? "Yes" : "No") << '\n'
-               << " - Policy Stacks: Sell " << sellableStacks
-               << " | Discard-if-full " << discardableStacks
-               << " | Protected " << protectedStacks << '\n'
-               << " - Cleanup Projection: " << freeSlots << " -> " << projectedFreeSlots
-               << " free | Target " << requiredSlots
-               << " | Can meet target: " << (projectedFreeSlots >= requiredSlots ? "Yes" : "No") << '\n'
-               << " - Blocked Loot Corpses: " << Actions::LootAction::GetInventoryBlockedLootCount(bot) << '\n'
-               << " - Cleanup Backoff: " << brain->GetInventoryCleanupRetryRemainingSeconds()
-               << "s remaining | Free slots when blocked: " << brain->GetInventoryCleanupBlockedFreeSlots() << '\n'
-               << " - Live Vendor Within 30yd: "
-               << (liveVendor ? fmt::format("{} (Entry {})", liveVendor->GetName(), liveVendor->GetEntry()) : "None") << '\n'
-               << " - Cached Vendor: " << cachedVendor << '\n'
-               << " - Town Plan: Target slots " << plan.targetFreeBagSlots
-               << " | Steps " << plan.steps.size()
-               << " | Missing vendor " << (plan.blockedByMissingVendor ? "Yes" : "No")
-               << " | Protected block " << (plan.blockedByProtectedInventory ? "Yes" : "No") << '\n'
-               << " - Inventory Decisions:" << items.str();
-
-        return EmitBotStatus(output.str());
+        return Commands::BotDiagnostics::FormatVendorStatus(brain);
     }
 
     std::string CoreLogic::GetBotQuestStatus(std::string const& botName)
     {
-        std::string formattedName = Factory::BotFactory::NormalizeBotName(botName);
-        ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(formattedName);
-        auto runtime = guid ? s_botRuntimes.find(guid) : s_botRuntimes.end();
-        if (!guid || runtime == s_botRuntimes.end() || !runtime->second.brain)
+        Brain::BotBrain* brain = FindBotBrainByName(botName);
+        if (!brain)
             return EmitBotStatus("Bot '" + botName + "' has no active brain or is not in world.");
-
-        Brain::BotBrain* brain = runtime->second.brain.get();
         Player* bot = brain->GetBot();
         if (!bot || !bot->IsInWorld())
             return EmitBotStatus("Bot '" + botName + "' is not currently in world.");
-
-        const auto& bb = brain->GetBlackboard();
-        std::ostringstream output;
-        output << "[WorldBots Quest Status] " << bot->GetName() << '\n'
-               << " - Goal / Action: " << brain->GetGoalString() << " / " << brain->GetActionString() << '\n'
-               << " - Selected Quest: " << (brain->GetActiveQuestId() ? std::to_string(brain->GetActiveQuestId()) : "None") << '\n'
-               << " - Progress Watch: Quest " << brain->GetQuestProgressWatchId()
-               << " | Active-work elapsed " << brain->GetQuestProgressWatchElapsedMs() << "ms / 180000ms\n"
-               << " - Inventory: " << bb.inv.freeBagSlots << '/' << bb.inv.totalBagSlots
-               << " free | Blocked loot corpses " << Actions::LootAction::GetInventoryBlockedLootCount(bot)
-               << " | Cleanup backoff " << brain->GetInventoryCleanupRetryRemainingSeconds() << "s\n"
-               << " - Active Quests: " << bb.quest.activeQuests.size();
-
-        for (const auto& quest : bb.quest.activeQuests)
-        {
-            Quest const* questTemplate = sObjectMgr->GetQuestTemplate(quest.questId);
-            uint32_t suppressed = brain->GetQuestSuppressionRemainingSeconds(quest.questId);
-            output << "\n   Quest " << quest.questId << " ('"
-                   << (questTemplate ? questTemplate->GetTitle() : "Unknown") << "')"
-                   << " | Level " << (questTemplate ? questTemplate->GetQuestLevel() : 0)
-                   << " | " << (quest.questId == brain->GetActiveQuestId() ? "SELECTED" : "not selected")
-                   << " | Suppressed " << suppressed << "s";
-            if (quest.hasTargetPosition)
-            {
-                output << "\n     Target: Map " << quest.targetPosition.mapId << " at ("
-                       << fmt::format("{:.1f}, {:.1f}, {:.1f}", quest.targetPosition.x,
-                           quest.targetPosition.y, quest.targetPosition.z)
-                       << ") | Distance " << fmt::format("{:.1f}", Helper::Distance2D(
-                           bot->GetPositionX(), bot->GetPositionY(),
-                           quest.targetPosition.x, quest.targetPosition.y)) << "yd";
-            }
-            else
-                output << "\n     Target: unresolved";
-
-            if (quest.objectives.empty())
-                output << "\n     Objectives: none resolved";
-
-            for (const auto& objective : quest.objectives)
-            {
-                output << "\n     - " << QuestObjectiveTypeName(objective.type)
-                       << " Entry " << objective.targetEntry;
-                if (objective.itemId != 0)
-                {
-                    ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(objective.itemId);
-                    output << " | Item " << objective.itemId << " ('"
-                           << (itemTemplate ? itemTemplate->Name1 : "Unknown") << "')";
-                }
-                output << " | Progress " << objective.currentCount << '/' << objective.requiredCount;
-
-                if (objective.type == Blackboard::QuestObjectiveType::CollectItem &&
-                    objective.itemId != 0 && objective.currentCount < objective.requiredCount)
-                {
-                    ItemPosCountVec destination;
-                    InventoryResult storeResult = bot->CanStoreNewItem(
-                        NULL_BAG, NULL_SLOT, destination, objective.itemId, 1);
-                    output << " | Store preflight: " << InventoryResultName(storeResult)
-                           << " (" << static_cast<uint32_t>(storeResult) << ')';
-                }
-            }
-        }
-
-        output << "\n - Completed Quests: " << bb.quest.completedQuests.size();
-        for (const auto& quest : bb.quest.completedQuests)
-        {
-            Quest const* questTemplate = sObjectMgr->GetQuestTemplate(quest.questId);
-            output << "\n   - " << quest.questId << " ('"
-                   << (questTemplate ? questTemplate->GetTitle() : "Unknown") << "')"
-                   << " | Turn-in position " << (quest.hasTurnInPosition ? "resolved" : "missing")
-                   << " | Reward inventory blocked "
-                   << (Helper::QuestUtils::IsRewardBlockedByInventory(bot, questTemplate) ? "Yes" : "No");
-        }
-
-        auto suppressedQuests = brain->GetSuppressedQuests();
-        output << "\n - Suspended Quests: " << suppressedQuests.size();
-        for (const auto& [questId, remaining] : suppressedQuests)
-            output << "\n   - Quest " << questId << ": " << remaining << "s remaining";
-
-        return EmitBotStatus(output.str());
+        return Commands::BotDiagnostics::FormatQuestStatus(brain);
     }
 
     std::string CoreLogic::RunTestCommand(std::string const& arguments)
     {
-        if (!Config::BotConfig::AreTestsEnabled())
-            return "WorldBots tests are disabled. Set WorldBots.Tests.Enable = 1 to use .bot test commands.";
-
-        std::string command = arguments;
-        while (!command.empty() && command.front() == ' ')
-            command.erase(command.begin());
-        while (!command.empty() && command.back() == ' ')
-            command.pop_back();
-
-        if (command.empty() || command == "list")
-            return Testing::ScenarioRunner::ListScenarios();
-        if (command == "logic")
-            return Testing::ScenarioRunner::RunLogicScenarios();
-
-        constexpr std::string_view planPrefix = "plan";
-        if (command.size() >= planPrefix.size() && command.compare(0, planPrefix.size(), planPrefix) == 0 &&
-            (command.size() == planPrefix.size() || command[planPrefix.size()] == ' '))
-        {
-            std::string botName = command.size() == planPrefix.size()
-                ? "Botharry" : command.substr(planPrefix.size() + 1);
-            while (!botName.empty() && botName.front() == ' ')
-                botName.erase(botName.begin());
-
-            std::string formattedName = Factory::BotFactory::NormalizeBotName(botName);
-            ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(formattedName);
-            auto runtime = guid ? s_botRuntimes.find(guid) : s_botRuntimes.end();
-            if (!guid || runtime == s_botRuntimes.end() || !runtime->second.brain)
-                return "Bot '" + botName + "' has no active brain or is not in world.";
-
-            return Testing::ScenarioRunner::DescribeTownPlan(
-                formattedName, runtime->second.brain->PreviewTownPlan());
-        }
-
-        return Testing::ScenarioRunner::ListScenarios();
+        return Commands::BotCommands::RunTest(arguments, FindBotBrainByName);
     }
 
     std::string CoreLogic::RunTraceCommand(std::string const& arguments)
     {
-        if (!Config::BotConfig::AreTestsEnabled())
-            return "WorldBots trace commands are disabled. Set WorldBots.Tests.Enable = 1 to use .bot trace.";
-
-        std::string command = arguments;
-        while (!command.empty() && command.front() == ' ')
-            command.erase(command.begin());
-        while (!command.empty() && command.back() == ' ')
-            command.pop_back();
-
-        std::size_t separator = command.find(' ');
-        std::string botName = separator == std::string::npos ? command : command.substr(0, separator);
-        std::string mode = separator == std::string::npos ? "status" : command.substr(separator + 1);
-        while (!mode.empty() && mode.front() == ' ')
-            mode.erase(mode.begin());
-
-        if (botName.empty())
-            return "Usage: .bot trace <name> on|off|status";
-        if (mode != "on" && mode != "off" && mode != "status")
-            return "Usage: .bot trace <name> on|off|status";
-
-        std::string formattedName = Factory::BotFactory::NormalizeBotName(botName);
-        ObjectGuid guid = sCharacterCache->GetCharacterGuidByName(formattedName);
-        auto runtime = guid ? s_botRuntimes.find(guid) : s_botRuntimes.end();
-        if (!guid || runtime == s_botRuntimes.end() || !runtime->second.brain ||
-            !runtime->second.brain->GetBot())
-        {
-            return "Bot '" + botName + "' has no active brain or is not in world.";
-        }
-
-        uint32_t guidLow = static_cast<uint32_t>(guid.GetCounter());
-        if (mode == "on")
-            Diagnostics::BotTrace::SetEnabled(guidLow, true);
-        else if (mode == "off")
-            Diagnostics::BotTrace::SetEnabled(guidLow, false);
-
-        bool enabled = Diagnostics::BotTrace::IsEnabled(guidLow);
-        std::string response = "Trace for bot '" + formattedName + "' is " +
-            (enabled ? "enabled." : "disabled.");
-        if (Diagnostics::BotTrace::IsGlobalVerbose())
-            response += " WorldBots.VerboseLogging is enabled, so other bots still emit verbose logs.";
-        return response;
+        return Commands::BotCommands::RunTrace(arguments, FindBotBrainByName);
     }
 
     void CoreLogic::SetVerboseLogging(bool enabled)
@@ -808,16 +889,32 @@ namespace Core
             " - Awaiting account/character preparation: {}\n"
             " - Prepared login queue (including retries): {}\n"
             " - Login pipelines in flight: {}/{}\n"
+            " - Startup/player grace/launch cooldown: {} / {} / {} ms\n"
+            " - Player login priority pause: {} (realm queue: {})\n"
+            " - Sessions owned/adopted: {} / {}\n"
             " - Login timeout/retries: {} ms / {}\n"
             " - Save batch: {} every {} ms (per-bot target {} ms)\n"
             " - Account mode: {}\n"
-            " - Factory operations per tick: {}\n"
+            " - Factory operations/budget per tick: {} / {} ms\n"
+            " - Runtime batch/budget: {} bots / {} ms\n"
+            " - Sense last/max/deferred: {} bots in {} us / {} us / {}\n"
+            " - Think last/max/deferred: {} bots in {} us / {} us / {}\n"
+            " - Action last/max/deferred: {} bots in {} us / {} us / {}\n"
+            " - Maintenance last/max/deferred: {} bots in {} us / {} us / {}\n"
+            " - Logging: {} (traced bots receive detail in every mode)\n"
             " - Maximum bot count: {}",
             GetActiveBotCount(),
             Factory::BotFactory::GetPendingProvisionCount(),
             Factory::BotFactory::GetPendingSpawnCount(),
             BotAuth::GetPendingLoginCount(),
             Config::BotConfig::GetMaxConcurrentLogins(),
+            Factory::BotFactory::GetStartupGraceRemainingMs(),
+            Factory::BotFactory::GetPlayerLoginGraceRemainingMs(),
+            Factory::BotFactory::GetLoginLaunchCooldownRemainingMs(),
+            Factory::BotFactory::IsPausedForPlayerLogin() ? "Yes" : "No",
+            sWorld ? sWorld->GetQueuedSessionCount() : 0,
+            BotAuth::GetOwnedSessionCount(),
+            BotAuth::GetAdoptedSessionCount(),
             Config::BotConfig::GetLoginTimeoutMs(),
             Config::BotConfig::GetLoginMaxRetries(),
             Config::BotConfig::GetSaveBatchSize(),
@@ -825,6 +922,14 @@ namespace Core
             Config::BotConfig::GetSaveBotIntervalMs(),
             Config::BotConfig::UseDedicatedAccounts() ? "Dedicated (one marked account per bot)" : "Shared legacy account",
             Config::BotConfig::GetFactoryOperationsPerTick(),
+            Config::BotConfig::GetFactoryTaskBudgetMs(),
+            Config::BotConfig::GetRuntimeBotBatchSize(),
+            Config::BotConfig::GetRuntimeTaskBudgetMs(),
+            s_senseMetrics.lastBatch, s_senseMetrics.lastMicros, s_senseMetrics.maxMicros, s_senseMetrics.deferredBots,
+            s_thinkMetrics.lastBatch, s_thinkMetrics.lastMicros, s_thinkMetrics.maxMicros, s_thinkMetrics.deferredBots,
+            s_actionMetrics.lastBatch, s_actionMetrics.lastMicros, s_actionMetrics.maxMicros, s_actionMetrics.deferredBots,
+            s_maintenanceMetrics.lastBatch, s_maintenanceMetrics.lastMicros, s_maintenanceMetrics.maxMicros, s_maintenanceMetrics.deferredBots,
+            Diagnostics::BotTrace::GetModeName(),
             Config::BotConfig::GetMaxBotCount()));
     }
 
@@ -842,10 +947,7 @@ namespace Core
         if (MovementManager* mgr = GetBotMovementManager(botGuidLow))
         {
             ObjectGuid targetGuid = ObjectGuid::Create<HighGuid::Player>(targetGuidLow);
-            if (Unit* target = ObjectAccessor::FindPlayer(targetGuid))
-            {
-                mgr->FollowExternal(target, distance, angle);
-            }
+            mgr->FollowExternal(targetGuid, distance, angle);
         }
     }
 
@@ -854,10 +956,7 @@ namespace Core
         if (MovementManager* mgr = GetBotMovementManager(botGuidLow))
         {
             ObjectGuid targetGuid = ObjectGuid::Create<HighGuid::Player>(targetGuidLow);
-            if (Unit* target = ObjectAccessor::FindPlayer(targetGuid))
-            {
-                mgr->ChaseExternal(target);
-            }
+            mgr->ChaseExternal(targetGuid);
         }
     }
 
@@ -871,6 +970,11 @@ namespace Core
 
     uint8_t CoreLogic::BotGetMovementState(uint32_t botGuidLow)
     {
+        ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(botGuidLow);
+        Player* bot = ObjectAccessor::FindPlayer(guid);
+        if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
+            return static_cast<uint8_t>(BotMovementState::Idle);
+
         if (MovementManager* mgr = GetBotMovementManager(botGuidLow))
         {
             return static_cast<uint8_t>(mgr->GetState());

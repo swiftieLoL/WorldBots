@@ -8,6 +8,7 @@
 #include "DataStores/DBCStructure.h"
 #include "Log.h"
 #include "Diagnostics/BotTrace.h"
+#include <algorithm>
 #include <mutex>
 
 namespace Helper
@@ -18,7 +19,9 @@ namespace Helper
             return false;
 
         SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
-        if (!spellInfo || spellInfo->SpellLevel == 0 || !SpellMgr::IsSpellValid(spellInfo, nullptr, false))
+        if (!spellInfo || !SpellMgr::IsSpellValid(spellInfo, nullptr, false))
+            return false;
+        if (spellInfo->IsPassive() && spellInfo->SpellLevel == 0)
             return false;
 
         uint32_t classMask = 1u << (cls - 1);
@@ -60,7 +63,12 @@ namespace Helper
                 for (uint8_t candidateClass = CLASS_WARRIOR; candidateClass <= CLASS_DRUID; ++candidateClass)
                 {
                     if (IsTrainableClassSpell(spellId, candidateClass))
-                        s_trainableSpellsByClass[candidateClass].push_back({ spellId, spellInfo->SpellLevel });
+                    {
+                        uint32_t reqLevel = std::max(spellInfo->SpellLevel, spellInfo->BaseLevel);
+                        if (reqLevel == 0)
+                            reqLevel = 1;
+                        s_trainableSpellsByClass[candidateClass].push_back({ spellId, reqLevel });
+                    }
                 }
             }
         });

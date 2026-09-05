@@ -1,16 +1,16 @@
 #pragma once
 
-#include "BotBlackboard.h"
+#include "Blackboard/BotBlackboard.h"
 
 class Player;
 class Quest;
 
-namespace Blackboard
+namespace Sense
 {
     class QuestItemSourceResolver
     {
     public:
-        static QuestObjectiveData Resolve(Player* bot, Quest const* questTemplate, QuestState& questState,
+        static Blackboard::QuestObjectiveData Resolve(Player* bot, Quest const* questTemplate, Blackboard::QuestState& questState,
             uint32_t questId, uint32_t itemId, uint32_t requiredCount, bool forceFullRescan);
     };
 }

@@ -101,6 +101,15 @@ flowchart TD
 - After a repeated-death or no-progress failure, a time-only suppression can
   recreate the same loop without changing the bot's power. Retrying after one
   gained level gives the recovery phase a measurable exit condition.
+- Quest-ID suppression alone does not stop churn when several quests share one
+  unreachable giver hub. Remember the destination geography per bot: briefly
+  cool the hub after the first failed first leg, escalate after repeated
+  evidence, and feed that same geography back into both local sensing and
+  world-starter discovery.
+- Synthetic travel edges need journey-scoped failure state. Blocking only
+  static graph nodes cannot suppress a failed Hearthstone edge whose endpoints
+  are rebuilt for every route; without an explicit journey flag, a 20-second
+  timeout can silently repeat until the global replan budget is exhausted.
 - Static creature templates may guide travel, but live attack authorization
   must still check spawned level, rank, hostility, current victim, and loot
   ownership on the main thread.

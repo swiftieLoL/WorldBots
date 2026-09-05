@@ -13,6 +13,7 @@
 #include "QuestAction.h"
 #include "UnstuckAction.h"
 #include "TownRunAction.h"
+#include "RevivePartyMemberAction.h"
 
 namespace Actions
 {
@@ -21,7 +22,9 @@ namespace Actions
         switch (request.goal)
         {
             case Brain::BotGoal::Combat:
-                return std::make_unique<CombatAction>(std::get<Brain::TargetActionRequest>(request.payload).targetGuid);
+                if (auto const* target = std::get_if<Brain::TargetActionRequest>(&request.payload))
+                    return std::make_unique<CombatAction>(target->targetGuid);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::Loot:
                 return std::make_unique<LootAction>();
@@ -30,52 +33,74 @@ namespace Actions
                 return std::make_unique<VendorAction>();
 
             case Brain::BotGoal::TownRun:
-                return std::make_unique<TownRunAction>(std::get<Brain::TownRunActionRequest>(request.payload).plan);
+                if (auto const* town = std::get_if<Brain::TownRunActionRequest>(&request.payload))
+                    return std::make_unique<TownRunAction>(town->plan, town->suppressedNpcEntries,
+                        town->maxVendorTravelDistance, town->dangerAreas);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::TurnInQuest:
-                return std::make_unique<TurnInQuestAction>(std::get<Brain::QuestActionRequest>(request.payload).questId);
+                if (auto const* quest = std::get_if<Brain::QuestActionRequest>(&request.payload))
+                    return std::make_unique<TurnInQuestAction>(quest->questId, quest->dangerAreas);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::ProgressQuest:
-                return std::make_unique<ProgressQuestAction>(std::get<Brain::QuestActionRequest>(request.payload).questId);
+                if (auto const* quest = std::get_if<Brain::QuestActionRequest>(&request.payload))
+                    return std::make_unique<ProgressQuestAction>(quest->questId, quest->dangerAreas);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::AcceptQuest:
-                return std::make_unique<AcceptQuestAction>(std::get<Brain::QuestActionRequest>(request.payload).questId);
+                if (auto const* quest = std::get_if<Brain::QuestActionRequest>(&request.payload))
+                    return std::make_unique<AcceptQuestAction>(quest->questId, quest->dangerAreas);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::MoveToNpc:
-            {
-                const Common::PositionInfo& destination = std::get<Brain::MoveActionRequest>(request.payload).destination;
-                return std::make_unique<MoveToAction>(destination.x, destination.y, destination.z, destination.mapId);
-            }
+                if (auto const* move = std::get_if<Brain::MoveActionRequest>(&request.payload))
+                    return std::make_unique<MoveToAction>(move->destination.x, move->destination.y, move->destination.z, move->destination.mapId);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::FollowTarget:
-                return std::make_unique<FollowAction>(std::get<Brain::TargetActionRequest>(request.payload).targetGuid);
+                if (auto const* follow = std::get_if<Brain::FollowActionRequest>(&request.payload))
+                    return std::make_unique<FollowAction>(follow->targetGuid, follow->distance, follow->angle);
+                return std::make_unique<IdleAction>();
+
+            case Brain::BotGoal::RevivePartyMember:
+                if (auto const* target = std::get_if<Brain::TargetActionRequest>(&request.payload))
+                    return std::make_unique<RevivePartyMemberAction>(target->targetGuid);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::Flee:
-                return std::make_unique<FleeAction>(std::get<Brain::TargetActionRequest>(request.payload).targetGuid);
+                if (auto const* target = std::get_if<Brain::TargetActionRequest>(&request.payload))
+                    return std::make_unique<FleeAction>(target->targetGuid);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::Resurrect:
                 return std::make_unique<ResurrectAction>();
 
             case Brain::BotGoal::Unstuck:
-                return std::make_unique<UnstuckAction>(std::get<Brain::UnstuckActionRequest>(request.payload).deadlyQuestId);
+                if (auto const* unstuck = std::get_if<Brain::UnstuckActionRequest>(&request.payload))
+                    return std::make_unique<UnstuckAction>(unstuck->deadlyQuestId,
+                        unstuck->progressionRecovery);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::Rest:
                 return std::make_unique<RestAction>();
 
             case Brain::BotGoal::Wander:
-            {
-                const Brain::WanderActionRequest& wander = std::get<Brain::WanderActionRequest>(request.payload);
-                return std::make_unique<WanderAction>(wander.origin.x, wander.origin.y, wander.origin.z,
-                    wander.radius, wander.suppressedQuests);
-            }
+                if (auto const* wander = std::get_if<Brain::WanderActionRequest>(&request.payload))
+                    return std::make_unique<WanderAction>(wander->origin.x, wander->origin.y, wander->origin.z,
+                        wander->radius, wander->suppressedQuests,
+                        wander->suppressedDestinations);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::Grind:
-            {
-                const Brain::GrindActionRequest& grind = std::get<Brain::GrindActionRequest>(request.payload);
-                return std::make_unique<GrindAction>(grind.minLevelOffset, grind.maxLevelOffset);
-            }
+                if (auto const* grind = std::get_if<Brain::GrindActionRequest>(&request.payload))
+                    return std::make_unique<GrindAction>(grind->minLevelOffset, grind->maxLevelOffset,
+                        grind->suppressedSpawnIds, grind->suppressedCreatureEntries,
+                        grind->suppressedDestinations, grind->dangerAreas);
+                return std::make_unique<IdleAction>();
 
             case Brain::BotGoal::Idle:
+            case Brain::BotGoal::WaitForPartyResurrection:
             default:
                 return std::make_unique<IdleAction>();
         }

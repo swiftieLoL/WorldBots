@@ -22,5 +22,13 @@ namespace Combat
             MovementManager* movement,
             const Blackboard::BotBlackboard& blackboard,
             uint32_t deltaMs) = 0;
+
+        virtual bool TryDisengageCC(
+            Player* /*bot*/,
+            Unit* /*threat*/,
+            const Blackboard::BotBlackboard& /*blackboard*/)
+        {
+            return false;
+        }
     };
 }

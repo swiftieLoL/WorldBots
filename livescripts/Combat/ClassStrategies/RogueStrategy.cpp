@@ -3,11 +3,9 @@
 
 namespace Combat
 {
-    void RogueStrategy::UpdateCombat(Player* bot, Unit* target, MovementManager* movement,
-        const Blackboard::BotBlackboard& blackboard, uint32_t deltaMs)
+    void RogueStrategy::ExecuteCombat(Player* bot, Unit* target, MovementManager* movement,
+        const Blackboard::BotBlackboard& blackboard)
     {
-        if (!ClassStrategyUtils::IsValid(bot, target)) return;
-        _decisionTimer.Tick(deltaMs);
         if (!ClassStrategyUtils::MaintainMelee(bot, target, movement) ||
             bot->IsNonMeleeSpellCast(false) || !_decisionTimer.IsReady()) return;
 
@@ -15,9 +13,8 @@ namespace Combat
             ClassStrategyUtils::TryCastRank(bot, bot, 5277, "Rogue", "Evasion"))
         { _decisionTimer.Set(1000); return; }
 
-        if (target->IsNonMeleeSpellCast(false) &&
-            ClassStrategyUtils::TryCastRank(bot, target, 1766, "Rogue", "Kick"))
-        { _decisionTimer.Set(500); return; }
+        if (ClassStrategyUtils::TryInterrupt(bot, target, 1766, "Rogue", "Kick", _decisionTimer, 500))
+            return;
 
         uint8_t comboPoints = bot->GetComboPoints(target);
         if (comboPoints >= 4 &&
@@ -30,5 +27,26 @@ namespace Combat
 
         if (ClassStrategyUtils::TryCastRank(bot, target, 1752, "Rogue", "Sinister Strike"))
             _decisionTimer.Set(500);
+    }
+
+    bool RogueStrategy::ExecuteDisengageCC(
+        Player* bot,
+        Unit* threat,
+        const Blackboard::BotBlackboard& /*blackboard*/)
+    {
+        if (bot->IsWithinMeleeRange(threat) && ClassStrategyUtils::TryCastRank(bot, threat, 1776, GetName(), "Gouge"))
+            return true;
+
+        float dist = bot->GetDistance(threat);
+        if (dist <= 10.0f && bot->HasSpell(2094) && ClassStrategyUtils::TryCast(bot, threat, 2094, GetName(), "Blind"))
+            return true;
+
+        if (bot->HasSpell(2983) && !bot->HasAura(2983) && ClassStrategyUtils::TryCast(bot, bot, 2983, GetName(), "Sprint"))
+            return true;
+
+        if (bot->HasSpell(5277) && !bot->HasAura(5277) && ClassStrategyUtils::TryCast(bot, bot, 5277, GetName(), "Evasion"))
+            return true;
+
+        return false;
     }
 }

@@ -1,14 +1,23 @@
 #pragma once
 
-#include "Globals/ObjectMgr.h"
 #include "ObjectGuid.h"
 #include "Helper/CommonTypes.h"
+#include "Party/PartyCoordination.h"
+#include "Brain/SuppressionRegistry.h"
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
+#include <limits>
 
 namespace Blackboard
 {
     using PositionInfo = Common::PositionInfo;
+
+    struct RefreshState
+    {
+        bool initialized = false;
+        uint32_t ageMs = std::numeric_limits<uint32_t>::max();
+    };
 
     enum class QuestTargetKind : uint8_t
     {
@@ -31,14 +40,25 @@ namespace Blackboard
 
     struct QuestObjectiveData
     {
+        // targetEntry is the entry credited by the quest log. Some item-use
+        // quests credit a synthetic entry while their spell conditions name a
+        // different live creature or GameObject. Keep both identities so
+        // sensing can route to the real entity without fabricating credit.
         uint32_t targetEntry = 0;
+        uint32_t interactionEntry = 0;
         uint32_t itemId = 0;
+        uint32_t sourceItemId = 0;
+        uint32_t sourceSpellId = 0;
         QuestObjectiveType type = QuestObjectiveType::Unsupported;
         QuestTargetKind targetKind = QuestTargetKind::None;
+        QuestTargetKind interactionKind = QuestTargetKind::None;
+        bool sourceSpellTargetsEntity = false;
         uint32_t currentCount = 0;
         uint32_t requiredCount = 0;
         PositionInfo location;
         bool hasLocation = false;
+        bool combatLevelSuitable = true;
+        bool vendorPurchase = false;
     };
 
     struct KnownQuest
@@ -49,6 +69,7 @@ namespace Blackboard
         PositionInfo questGiverPosition;
         QuestTargetKind questGiverKind = QuestTargetKind::Creature;
         bool hasQuestGiverPosition = false;
+        bool isGlobalDiscovery = false;
     };
 
     struct ActiveQuest
@@ -87,9 +108,10 @@ namespace Blackboard
         bool sourceResolutionAttempted = false;
         QuestTargetKind targetKind = QuestTargetKind::None;
         bool hasLocation = false;
+        bool vendorPurchase = false;
     };
 
-    struct QuestState
+    struct QuestState : RefreshState
     {
         uint32_t refreshIntervalMs = 1000;
         uint32_t elapsedMs = 1000; // Trigger initial scan immediately on tick 1
@@ -98,15 +120,33 @@ namespace Blackboard
         std::vector<ActiveQuest> activeQuests;
         std::vector<ReadyToTurnInQuest> completedQuests;
 
+        // Supplied by BotBrain before the quest sense pass. Discovery uses
+        // this set to move past timed, level-deferred, and unsupported quests
+        // instead of continually republishing the same cached world starter.
+        std::unordered_set<uint32_t> excludedQuestIds;
+        // Supplied by BotBrain alongside excludedQuestIds. This lets both the
+        // nearby scan and cached world-starter discovery move past a quest hub
+        // whose first executable travel leg has repeatedly failed for this bot.
+        std::vector<Brain::DestinationSuppression> excludedQuestDestinations;
+
         // Cached resolved item loot sources to avoid expensive re-evaluation every tick
         // Quest-scoped because the same item can be a delivered source item
         // in one quest and a normal loot objective in another.
         std::unordered_map<uint64_t, CachedItemSource> itemSourceCache;
         uint32_t fullRescanTimerMs = 0;
         static constexpr uint32_t FullRescanIntervalMs = 30000;
+
+        // Global starter discovery is substantially more expensive than the
+        // nearby live scan. Cache both successful and unsuccessful searches so
+        // a bot without local quest work does not rescan the world every second.
+        KnownQuest cachedWorldStarter;
+        bool hasCachedWorldStarter = false;
+        bool worldStarterScanAttempted = false;
+        uint32_t worldStarterScanElapsedMs = 30000;
+        static constexpr uint32_t WorldStarterRescanIntervalMs = 30000;
     };
 
-    struct SelfState
+    struct SelfState : RefreshState
     {
         uint32_t refreshIntervalMs = 100;
         uint32_t elapsedMs = 100;
@@ -117,8 +157,6 @@ namespace Blackboard
         uint32_t maxMana = 0;
         uint8_t healthPct = 100;
         uint8_t manaPct = 100;
-        bool isLowHealth = false;
-        bool isLowMana = false;
 
         uint32_t level = 1;
         uint32_t money = 0;
@@ -142,37 +180,43 @@ namespace Blackboard
         bool isCCed = false;
     };
 
-    struct SpatialState
+    struct SpatialState : RefreshState
     {
         uint32_t refreshIntervalMs = 200;
         uint32_t elapsedMs = 200;
 
         ObjectGuid nearestEnemyGuid;
-        ObjectGuid nearestEnemyInLoSGuid;
         ObjectGuid nearestFriendlyGuid;
-        ObjectGuid nearestNpcGuid;
-        ObjectGuid nearestCorpseGuid;
-        ObjectGuid nearestGameObjectGuid;
         std::vector<ObjectGuid> hostileGuids;
-        std::vector<ObjectGuid> nearbyPlayerGuids;
-        std::vector<ObjectGuid> nearbyCorpseGuids;
-        std::vector<ObjectGuid> nearbyGameObjectGuids;
     };
 
-    struct PartyState
+    struct PartyState : RefreshState
     {
         uint32_t refreshIntervalMs = 200;
         uint32_t elapsedMs = 200;
 
         bool isInGroup = false;
         bool isGroupLeader = false;
+        bool leaderOnSameMap = false;
         ObjectGuid groupLeaderGuid;
+        ObjectGuid tankGuid;
+        ObjectGuid healerGuid;
+        ObjectGuid designatedResurrectorGuid;
+        ObjectGuid deadGroupMemberGuid;
+        ObjectGuid laggingQuestMemberGuid;
         ObjectGuid lowestHealthGroupMemberGuid;
         ObjectGuid groupTargetGuid;
+        Party::Role role = Party::Role::None;
+        uint8_t lowestHealthGroupMemberPct = 100;
+        float leaderDistance = 0.0f;
+        float formationDistance = 2.0f;
+        float formationAngle = 0.0f;
+        std::vector<uint32_t> leaderQuestIds;
+        uint32_t laggingQuestId = 0;
         std::vector<ObjectGuid> memberGuids;
     };
 
-    struct CombatState
+    struct CombatState : RefreshState
     {
         uint32_t refreshIntervalMs = 100;
         uint32_t elapsedMs = 100;
@@ -180,11 +224,9 @@ namespace Blackboard
         ObjectGuid currentTargetGuid;
         ObjectGuid primaryAttackerGuid;
         std::vector<ObjectGuid> attackerGuids;
-        uint32_t totalThreat = 0;
-        bool spellReady = true;
     };
 
-    struct NavigationState
+    struct NavigationState : RefreshState
     {
         uint32_t refreshIntervalMs = 100;
         uint32_t elapsedMs = 100;
@@ -197,7 +239,7 @@ namespace Blackboard
         bool isStuck = false;
     };
 
-    struct InventoryState
+    struct InventoryState : RefreshState
     {
         uint32_t refreshIntervalMs = 1000;
         uint32_t elapsedMs = 1000;
@@ -214,6 +256,7 @@ namespace Blackboard
         bool hasManaPotion = false;
         bool hasFood = false;
         bool hasWater = false;
+        bool needsRestock = false;
 
         uint32_t nearestVendorEntry = 0;
         PositionInfo vendorPosition;
@@ -221,6 +264,8 @@ namespace Blackboard
 
     struct BotBlackboard
     {
+        uint64_t generation = 0;
+        bool initialSnapshotReady = false;
         SelfState self;
         SpatialState spatial;
         PartyState party;

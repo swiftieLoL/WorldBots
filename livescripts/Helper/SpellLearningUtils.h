@@ -1,7 +1,8 @@
 #pragma once
 
-#include "Player.h"
 #include <cstdint>
+
+class Player;
 
 namespace Helper
 {

@@ -1,5 +1,7 @@
 #include "QuestAction.h"
+#include "TurnInInteractionPolicy.h"
 #include "Globals/ObjectMgr.h"
+#include "Player.h"
 #include "Creature.h"
 #include "GameObject.h"
 #include "Map.h"
@@ -9,17 +11,28 @@
 #include "Cache/BotCache.h"
 #include "Log.h"
 #include "Diagnostics/BotTrace.h"
+#include "Helper/NpcApproachHelper.h"
 #include <algorithm>
 
 namespace Actions
 {
+    namespace
+    {
+        bool IsQuestNoLongerActive(Player* bot, uint32_t questId)
+        {
+            if (!bot)
+                return false;
+            QuestStatus status = bot->GetQuestStatus(questId);
+            return status == QUEST_STATUS_NONE || status == QUEST_STATUS_REWARDED;
+        }
+    }
+
     void TurnInQuestAction::Start(Player* /*bot*/, MovementManager* /*movement*/)
     {
-        _completed = false;
-        _outcome = ActionOutcome::Running;
-        _outcomeReason.clear();
+        ResetOutcome();
         _failsafe.Reset();
         _retryLogTimerMs = 5000;
+        _questGiverResolveElapsedMs = 0;
         _worldTravel.Reset();
     }
 
@@ -27,9 +40,8 @@ namespace Actions
     {
         if (!bot || !bot->IsInWorld() || !movement)
         {
-            _outcome = ActionOutcome::RetryableFailure;
-            _outcomeReason = "bot or movement manager was unavailable during quest turn-in";
-            _completed = true;
+            Finish(ActionOutcome::RetryableFailure, "bot or movement manager was unavailable during quest turn-in",
+                FailureCategory::Transient, RecoveryDirective::RetryLater);
             return;
         }
 
@@ -38,10 +50,15 @@ namespace Actions
 
         if (blackboard.quest.completedQuests.empty())
         {
-            _outcome = bot->GetQuestStatus(_selectedQuestId) == QUEST_STATUS_NONE
-                ? ActionOutcome::Succeeded : ActionOutcome::RetryableFailure;
-            if (_outcome != ActionOutcome::Succeeded)
+            if (IsQuestNoLongerActive(bot, _selectedQuestId))
+                _outcome = ActionOutcome::Succeeded;
+            else
+            {
+                _outcome = ActionOutcome::Interrupted;
+                _failureCategory = FailureCategory::Transient;
+                _recoveryDirective = RecoveryDirective::None;
                 _outcomeReason = "completed quest disappeared from the blackboard before turn-in";
+            }
             _completed = true;
             return;
         }
@@ -57,27 +74,39 @@ namespace Actions
         }
         if (!selected)
         {
-            _outcome = bot->GetQuestStatus(_selectedQuestId) == QUEST_STATUS_NONE
-                ? ActionOutcome::Succeeded : ActionOutcome::RetryableFailure;
-            if (_outcome != ActionOutcome::Succeeded)
+            if (IsQuestNoLongerActive(bot, _selectedQuestId))
+                _outcome = ActionOutcome::Succeeded;
+            else
+            {
+                _outcome = ActionOutcome::Interrupted;
+                _failureCategory = FailureCategory::Transient;
+                _recoveryDirective = RecoveryDirective::None;
                 _outcomeReason = "selected quest disappeared from the completed quest list";
+            }
             _completed = true;
             return;
         }
         const auto& completed = *selected;
 
         QuestStatus liveStatus = bot->GetQuestStatus(completed.questId);
-        if (liveStatus == QUEST_STATUS_NONE)
+        if (IsQuestNoLongerActive(bot, completed.questId))
         {
             // A preceding town-run step already turned this quest in and the
-            // one-second blackboard snapshot has not refreshed yet.
+            // one-second blackboard snapshot has not refreshed yet. Ordinary
+            // one-shot quests report REWARDED here; repeatable quests report
+            // NONE, and both mean the turn-in succeeded.
             _outcome = ActionOutcome::Succeeded;
             _completed = true;
             return;
         }
         if (liveStatus != QUEST_STATUS_COMPLETE)
         {
-            _outcome = ActionOutcome::RetryableFailure;
+            // A live-state mismatch is a stale decision, not a quest failure.
+            // Replan after the next sense refresh without suppressing a quest
+            // that may have just advanced or been abandoned externally.
+            _outcome = ActionOutcome::Interrupted;
+            _failureCategory = FailureCategory::Transient;
+            _recoveryDirective = RecoveryDirective::None;
             _outcomeReason = "quest is no longer in a rewardable completed state";
             _completed = true;
             return;
@@ -86,18 +115,32 @@ namespace Actions
         if (!completed.hasTurnInPosition)
         {
             _outcome = ActionOutcome::Blocked;
+            _failureCategory = FailureCategory::Navigation;
+            _recoveryDirective = RecoveryDirective::RetryLater;
             _outcomeReason = "quest ender position is missing";
             _completed = true;
             return;
         }
 
-        if (_worldTravel.IsActive() || Travel::WorldTravel::NeedsTravel(bot, completed.turnInPosition))
+        // Let the live quest-ender resolver own nearby handoffs. In particular,
+        // quest 333 starts about 73 yards from its ender: using WorldTravel at
+        // 20 yards prevented the already-loaded ender from ever being approached.
+        const bool needsWorldTravel = Travel::WorldTravel::NeedsTravel(bot,
+            completed.turnInPosition,
+            TurnInInteractionPolicy::LiveQuestEnderResolveRange);
+        if (_worldTravel.IsActive() && !needsWorldTravel)
+            _worldTravel.Stop(bot, movement);
+
+        if (needsWorldTravel)
         {
             Travel::TravelResult travelResult = _worldTravel.Update(bot, movement,
-                completed.turnInPosition, deltaMs);
+                completed.turnInPosition, deltaMs, _dangerAreas,
+                blackboard.spatial.hostileGuids);
             if (travelResult == Travel::TravelResult::Failed)
             {
                 _outcome = ActionOutcome::Blocked;
+                _failureCategory = FailureCategory::Navigation;
+                _recoveryDirective = RecoveryDirective::RetryLater;
                 _outcomeReason = _worldTravel.GetFailureReason();
                 _completed = true;
             }
@@ -110,17 +153,21 @@ namespace Actions
         {
             TC_LOG_ERROR("server", "[WorldBots] [Quest] Cannot turn in unknown quest template {}", completed.questId);
             _outcome = ActionOutcome::Unsupported;
+            _failureCategory = FailureCategory::ContentUnsupported;
+            _recoveryDirective = RecoveryDirective::RetryLater;
             _outcomeReason = "quest template is missing";
             _completed = true;
             return;
         }
 
-        const auto questEnders = completed.questGiverKind == Blackboard::QuestTargetKind::GameObject
+        const auto& questEnders = completed.questGiverKind == Blackboard::QuestTargetKind::GameObject
             ? Cache::BotCache::GetGameObjectQuestEnders(completed.questId)
             : Cache::BotCache::GetQuestEnders(completed.questId);
         if (std::find(questEnders.begin(), questEnders.end(), completed.questGiverEntry) == questEnders.end())
         {
             _outcome = ActionOutcome::Blocked;
+            _failureCategory = FailureCategory::ContentUnsupported;
+            _recoveryDirective = RecoveryDirective::RetryLater;
             _outcomeReason = "selected object is not registered as an ender for this quest";
             _completed = true;
             return;
@@ -132,42 +179,47 @@ namespace Actions
             bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()))
         {
             _outcome = ActionOutcome::Blocked;
-            _outcomeReason = "quest ender travel made no progress or exceeded the hard turn-in timeout";
+            _failureCategory = FailureCategory::Navigation;
+            _recoveryDirective = RecoveryDirective::RetryLater;
+            _outcomeReason = std::string("quest ender travel failed: ") +
+                _failsafe.GetMovementFailureReason();
             _completed = true;
             return;
         }
 
-        if (!Helper::NpcUtils::IsInInteractionRange(bot, completed.turnInPosition.x, completed.turnInPosition.y, completed.turnInPosition.z, Constants::QuestInteractionRange))
-        {
-            movement->MoveTo(completed.turnInPosition.x, completed.turnInPosition.y, completed.turnInPosition.z, BotMovementState::Moving, false);
-            return;
-        }
-
+        // WorldTravel only owns the journey into the quest-end area. From
+        // here, approach the live ender directly: its cached spawn coordinate
+        // can be offset, on another floor, or stale even when the NPC is loaded
+        // and immediately reachable.
         bool turnInSucceeded = false;
         bool retryThroughBrain = false;
+        bool inventoryCapacityBlocked = false;
         auto rewardFrom = [&](Object* questGiver) {
             uint32 rewardIndex = 0;
             if (!Helper::QuestUtils::SelectRewardWithAvailableSpace(bot, questTemplate, rewardIndex))
             {
                 if (_retryLogTimerMs >= 5000)
                 {
-                    uint32 missingItemId = 0;
-                    uint32 itemCount = 0;
-                    uint32 requiredCount = 0;
-                    if (Helper::QuestUtils::FindMissingRequiredItem(bot, questTemplate, missingItemId, itemCount, requiredCount))
+                    if (Diagnostics::BotTrace::ShouldLog(bot, Diagnostics::LogEvent::Normal))
                     {
-                        TC_LOG_WARN("server", "[WorldBots] [Quest] Bot '{}' cannot turn in quest {} ('{}'): missing required item {}: {}/{} in inventory",
-                            bot->GetName(), completed.questId, questTemplate->GetTitle(), missingItemId, itemCount, requiredCount);
-                    }
-                    else if (Helper::QuestUtils::IsRewardBlockedByInventory(bot, questTemplate))
-                    {
-                        TC_LOG_WARN("server", "[WorldBots] [Quest] Bot '{}' cannot turn in quest {} ('{}'): reward inventory space is unavailable; returning control to the brain for vendoring",
-                            bot->GetName(), completed.questId, questTemplate->GetTitle());
-                    }
-                    else
-                    {
-                        TC_LOG_WARN("server", "[WorldBots] [Quest] Bot '{}' cannot turn in quest {} ('{}'): another reward prerequisite is unavailable",
-                            bot->GetName(), completed.questId, questTemplate->GetTitle());
+                        uint32 missingItemId = 0;
+                        uint32 itemCount = 0;
+                        uint32 requiredCount = 0;
+                        if (Helper::QuestUtils::FindMissingRequiredItem(bot, questTemplate, missingItemId, itemCount, requiredCount))
+                        {
+                            TC_LOG_WARN("server", "[WorldBots] [Quest] Bot '{}' cannot turn in quest {} ('{}'): missing required item {}: {}/{} in inventory",
+                                bot->GetName(), completed.questId, questTemplate->GetTitle(), missingItemId, itemCount, requiredCount);
+                        }
+                        else if (Helper::QuestUtils::IsRewardBlockedByInventory(bot, questTemplate))
+                        {
+                            TC_LOG_WARN("server", "[WorldBots] [Quest] Bot '{}' cannot turn in quest {} ('{}'): reward inventory space is unavailable; returning control to the brain for vendoring",
+                                bot->GetName(), completed.questId, questTemplate->GetTitle());
+                        }
+                        else
+                        {
+                            TC_LOG_WARN("server", "[WorldBots] [Quest] Bot '{}' cannot turn in quest {} ('{}'): another reward prerequisite is unavailable",
+                                bot->GetName(), completed.questId, questTemplate->GetTitle());
+                        }
                     }
                     _retryLogTimerMs = 0;
                 }
@@ -175,15 +227,19 @@ namespace Actions
                 // Do not vend, move, or retry from this action. Completing it
                 // returns control to BotBrain, which owns the Vendor goal.
                 retryThroughBrain = true;
+                inventoryCapacityBlocked = Helper::QuestUtils::IsRewardBlockedByInventory(bot, questTemplate);
                 return;
             }
 
             bot->RewardQuest(questTemplate, rewardIndex, questGiver, true);
-            turnInSucceeded = bot->GetQuestStatus(completed.questId) == QUEST_STATUS_NONE;
+            // RewardQuest removes the active quest and records ordinary
+            // one-shot quests as REWARDED. Repeatable quests normally return
+            // to NONE. Both states mean the turn-in completed successfully.
+            turnInSucceeded = IsQuestNoLongerActive(bot, completed.questId);
 
             if (turnInSucceeded)
             {
-                if (Diagnostics::BotTrace::ShouldLog(bot))
+                if (Diagnostics::BotTrace::ShouldLog(bot, Diagnostics::LogEvent::Normal))
                 {
                     TC_LOG_INFO("server", "[WorldBots] [Quest] Bot '{}' (GUID: {}) TURNED IN quest {} ('{}') to {} (Entry: {})",
                         bot->GetName(), bot->GetGUID().GetCounter(), completed.questId, questTemplate->GetTitle(),
@@ -193,49 +249,74 @@ namespace Actions
             }
             else
             {
-                TC_LOG_WARN("server", "[WorldBots] [Quest] Bot '{}' attempted to turn in quest {} ('{}'), but the quest remained active",
-                    bot->GetName(), completed.questId, questTemplate->GetTitle());
+                if (Diagnostics::BotTrace::ShouldLog(bot, Diagnostics::LogEvent::Normal))
+                {
+                    TC_LOG_WARN("server", "[WorldBots] [Quest] Bot '{}' attempted to turn in quest {} ('{}'), but the quest remained active",
+                        bot->GetName(), completed.questId, questTemplate->GetTitle());
+                }
+                retryThroughBrain = true;
             }
         };
 
         if (completed.questGiverKind == Blackboard::QuestTargetKind::GameObject)
         {
-            GameObject* go = completed.questGiverGuid
-                ? bot->GetMap()->GetGameObject(completed.questGiverGuid)
-                : bot->FindNearestGameObject(completed.questGiverEntry, Constants::DefaultNpcSearchRadius);
-            if (go)
+            GameObject* go = nullptr;
+            auto res = Helper::ApproachGameObject(bot, movement, completed.questGiverEntry,
+                completed.questGiverGuid,
+                TurnInInteractionPolicy::LiveQuestEnderResolveRange, go);
+            if (res == Helper::ApproachResult::Approaching)
             {
-                Helper::InteractionStatus status = Helper::NpcUtils::GetInteractionStatus(bot, go);
-                if (status == Helper::InteractionStatus::NeedsMovement)
+                _questGiverResolveElapsedMs = 0;
+                _outcomeReason.clear();
+                return;
+            }
+            if (res == Helper::ApproachResult::Ready)
+            {
+                _questGiverResolveElapsedMs = 0;
+                _outcomeReason.clear();
+                rewardFrom(go);
+            }
+            else
+            {
+                _questGiverResolveElapsedMs += deltaMs;
+                _outcomeReason = res == Helper::ApproachResult::NotFound
+                    ? "waiting for the live quest-end object near its cached position"
+                    : "the live quest-end object is currently not interactable";
+                if (TurnInInteractionPolicy::HasResolveTimedOut(
+                    _questGiverResolveElapsedMs))
                 {
-                    movement->MoveTo(go->GetPositionX(), go->GetPositionY(), go->GetPositionZ(),
-                        BotMovementState::Moving, false);
-                    return;
-                }
-                if (status == Helper::InteractionStatus::Ready)
-                {
-                    go->Use(bot);
-                    rewardFrom(go);
+                    retryThroughBrain = true;
                 }
             }
         }
         else
         {
-            Creature* creature = Helper::NpcUtils::FindNearbyCreatureByEntry(bot,
-                completed.questGiverEntry, Constants::DefaultNpcSearchRadius);
-            if (creature && creature->IsAlive())
+            Creature* creature = nullptr;
+            auto res = Helper::ApproachCreature(bot, movement, completed.questGiverEntry,
+                completed.questGiverGuid,
+                TurnInInteractionPolicy::LiveQuestEnderResolveRange, creature);
+            if (res == Helper::ApproachResult::Approaching)
             {
-                Helper::InteractionStatus status = Helper::NpcUtils::GetInteractionStatus(bot, creature);
-                if (status == Helper::InteractionStatus::NeedsMovement)
+                _questGiverResolveElapsedMs = 0;
+                _outcomeReason.clear();
+                return;
+            }
+            if (res == Helper::ApproachResult::Ready)
+            {
+                _questGiverResolveElapsedMs = 0;
+                _outcomeReason.clear();
+                rewardFrom(creature);
+            }
+            else
+            {
+                _questGiverResolveElapsedMs += deltaMs;
+                _outcomeReason = res == Helper::ApproachResult::NotFound
+                    ? "waiting for the live quest ender near its cached position"
+                    : "the live quest ender is currently not interactable";
+                if (TurnInInteractionPolicy::HasResolveTimedOut(
+                    _questGiverResolveElapsedMs))
                 {
-                    movement->MoveTo(creature->GetPositionX(), creature->GetPositionY(),
-                        creature->GetPositionZ(), BotMovementState::Moving, false);
-                    return;
-                }
-                if (status == Helper::InteractionStatus::Ready)
-                {
-                    Helper::NpcUtils::PrepareCreatureInteraction(bot, creature);
-                    rewardFrom(creature);
+                    retryThroughBrain = true;
                 }
             }
         }
@@ -246,7 +327,12 @@ namespace Actions
         else if (retryThroughBrain)
         {
             _outcome = ActionOutcome::RetryableFailure;
-            _outcomeReason = "quest reward prerequisites remained unavailable at the quest giver";
+            _failureCategory = inventoryCapacityBlocked
+                ? FailureCategory::InventoryCapacity : FailureCategory::Interaction;
+            _recoveryDirective = inventoryCapacityBlocked
+                ? RecoveryDirective::Replan : RecoveryDirective::RetryLater;
+            if (_outcomeReason.empty())
+                _outcomeReason = "quest reward or live quest-giver interaction did not complete";
         }
     }
 

@@ -2,8 +2,10 @@
 
 #include "Player.h"
 #include "QuestDef.h"
+#include "EquipmentUtils.h"
 
 #include <cstdint>
+#include <limits>
 
 namespace Helper::QuestUtils
 {
@@ -64,8 +66,9 @@ namespace Helper::QuestUtils
     }
 
     // Checks both quest completion requirements and the inventory capacity for
-    // the reward that will actually be selected. For choice rewards, select
-    // the first option that fits instead of assuming option zero is usable.
+    // the reward that will actually be selected. Choice rewards use the same
+    // class/spec-aware equipment policy as auto-equip; a real upgrade wins,
+    // then usable supplies/equipment, then vendor value.
     inline bool SelectRewardWithAvailableSpace(Player* bot, Quest const* quest, uint32_t& rewardIndex)
     {
         rewardIndex = 0;
@@ -77,18 +80,29 @@ namespace Helper::QuestUtils
             return bot->CanRewardQuest(quest, 0, false);
 
         bool hasChoiceItem = false;
+        bool foundReward = false;
+        float bestScore = -std::numeric_limits<float>::infinity();
         for (uint32_t index = 0; index < choiceCount; ++index)
         {
-            if (!quest->RewardChoiceItemId[index])
+            uint32_t itemId = quest->RewardChoiceItemId[index];
+            if (!itemId)
                 continue;
 
             hasChoiceItem = true;
             if (bot->CanRewardQuest(quest, index, false))
             {
-                rewardIndex = index;
-                return true;
+                float score = Helper::EquipmentUtils::ScoreQuestReward(bot, itemId);
+                if (!foundReward || score > bestScore)
+                {
+                    foundReward = true;
+                    bestScore = score;
+                    rewardIndex = index;
+                }
             }
         }
+
+        if (foundReward)
+            return true;
 
         // Some templates expose a choice count but contain no item choices.
         return !hasChoiceItem && bot->CanRewardQuest(quest, 0, false);

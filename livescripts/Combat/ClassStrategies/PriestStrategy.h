@@ -1,11 +1,10 @@
 #pragma once
 
-#include "IClassStrategy.h"
-#include "Helper/CommonTypes.h"
+#include "BaseCombatStrategy.h"
 
 namespace Combat
 {
-    class PriestStrategy : public IClassStrategy
+    class PriestStrategy : public BaseCombatStrategy
     {
     public:
         PriestStrategy() = default;
@@ -13,14 +12,16 @@ namespace Combat
 
         const char* GetName() const override { return "PriestStrategy"; }
 
-        void UpdateCombat(
+    protected:
+        void ExecuteCombat(
             Player* bot,
             Unit* target,
             MovementManager* movement,
-            const Blackboard::BotBlackboard& blackboard,
-            uint32_t deltaMs) override;
+            const Blackboard::BotBlackboard& blackboard) override;
 
-    private:
-        Common::CooldownTimer _cooldownTimer;
+        bool ExecuteDisengageCC(
+            Player* bot,
+            Unit* threat,
+            const Blackboard::BotBlackboard& blackboard) override;
     };
 }

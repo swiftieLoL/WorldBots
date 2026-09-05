@@ -5,13 +5,14 @@
 #include "Diagnostics/BotTrace.h"
 #include "Helper/MovementManager.h"
 #include "Helper/SpellUtils.h"
+#include "Helper/CommonTypes.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
 #include "Pet.h"
 #include "Player.h"
 #include "Spell.h"
 #include "Unit.h"
-#include <iterator>
+#include <span>
 
 namespace Combat::ClassStrategyUtils
 {
@@ -45,7 +46,7 @@ namespace Combat::ClassStrategyUtils
 
     inline void EnsureMeleeAttack(Player* bot, Unit* target)
     {
-        if (bot && target && bot->GetVictim() != target)
+        if (bot && target && (!bot->GetVictim() || bot->GetVictim() != target || !bot->HasUnitState(UNIT_STATE_MELEE_ATTACKING)))
             bot->Attack(target, true);
     }
 
@@ -55,6 +56,9 @@ namespace Combat::ClassStrategyUtils
             return false;
 
         EnsureMeleeAttack(bot, target);
+        if (bot->IsNonMeleeSpellCast(false))
+            return true;
+
         if (!bot->IsWithinMeleeRange(target))
         {
             if (movement)
@@ -98,5 +102,89 @@ namespace Combat::ClassStrategyUtils
         }
 
         return Helper::SpellUtils::TryCast(bot, target, 75);
+    }
+
+    inline bool TryMaintainAura(Player* bot, Unit* target, uint32_t baseSpellId,
+        const char* strategyName, const char* abilityName,
+        Common::CooldownTimer& timer, uint32_t delayMs = 1000)
+    {
+        if (Helper::SpellUtils::HasAuraInChain(target, baseSpellId))
+            return false;
+        if (!TryCastRank(bot, target, baseSpellId, strategyName, abilityName))
+            return false;
+        timer.Set(delayMs);
+        return true;
+    }
+
+    struct PrioritySpell
+    {
+        uint32_t baseSpellId;
+        const char* name;
+        uint32_t decisionDelayMs = 1000;
+    };
+
+    inline bool TryCastPriorityList(Player* bot, Unit* target,
+        std::span<const PrioritySpell> spells, const char* strategyName,
+        Common::CooldownTimer& timer)
+    {
+        for (const auto& spell : spells)
+        {
+            if (TryCastRank(bot, target, spell.baseSpellId, strategyName, spell.name))
+            {
+                timer.Set(spell.decisionDelayMs);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    inline bool TryInterrupt(Player* bot, Unit* target, uint32_t baseSpellId,
+        const char* strategyName, const char* abilityName,
+        Common::CooldownTimer& timer, uint32_t delayMs = 500)
+    {
+        if (!target || !target->IsNonMeleeSpellCast(false))
+            return false;
+        if (!TryCastRank(bot, target, baseSpellId, strategyName, abilityName))
+            return false;
+        timer.Set(delayMs);
+        return true;
+    }
+
+    inline bool TryCastEmergencyHeal(Player* bot, Unit* target)
+    {
+        if (!IsValid(bot, target))
+            return false;
+
+        switch (bot->GetClass())
+        {
+            case CLASS_PRIEST:
+                if (target->HealthBelowPct(35) && !Helper::SpellUtils::HasAuraInChain(target, 17) &&
+                    !target->HasAura(6788))
+                {
+                    if (TryCastRank(bot, target, 17, "Priest", "Power Word: Shield"))
+                        return true;
+                }
+                return TryCastRank(bot, target, 2061, "Priest", "Flash Heal") ||
+                       TryCastRank(bot, target, 2050, "Priest", "Lesser Heal");
+
+            case CLASS_PALADIN:
+                return TryCastRank(bot, target, 19750, "Paladin", "Flash of Light") ||
+                       TryCastRank(bot, target, 635, "Paladin", "Holy Light");
+
+            case CLASS_SHAMAN:
+                return TryCastRank(bot, target, 8004, "Shaman", "Lesser Healing Wave") ||
+                       TryCastRank(bot, target, 331, "Shaman", "Healing Wave");
+
+            case CLASS_DRUID:
+                if (!Helper::SpellUtils::HasAuraInChain(target, 774))
+                {
+                    if (TryCastRank(bot, target, 774, "Druid", "Rejuvenation"))
+                        return true;
+                }
+                return TryCastRank(bot, target, 5185, "Druid", "Healing Touch");
+
+            default:
+                return false;
+        }
     }
 }

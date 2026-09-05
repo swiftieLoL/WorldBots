@@ -16,13 +16,12 @@ namespace Combat
     class CombatPositioning
     {
     public:
-        // Maintains a visible ranged firing position and returns whether the
-        // target currently has line of sight.
-        static bool MaintainRanged(Player* bot, Unit* target, MovementManager* movement, float maximumRange);
-
         static constexpr RangeAdjustment ChooseRangeAdjustment(
-            float distance, float minimumRange, float maximumRange, bool hasLineOfSight)
+            float distance, float minimumRange, float maximumRange, bool hasLineOfSight,
+            bool preserveActiveCast = false)
         {
+            if (preserveActiveCast)
+                return RangeAdjustment::Hold;
             if (!hasLineOfSight || distance > maximumRange)
                 return RangeAdjustment::CloseDistance;
             if (minimumRange > 0.0f && distance < minimumRange)

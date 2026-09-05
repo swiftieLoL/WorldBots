@@ -1,14 +1,22 @@
+#include "Globals/ObjectMgr.h"
 #include "BotFactory.h"
 #include "Auth/BotAuth.h"
 #include "Auth/BotLoginPolicy.h"
 #include "Accounts/AccountMgr.h"
 #include "Cache/CharacterCache.h"
 #include "Config/BotConfig.h"
+#include "DatabaseEnv.h"
+#include "Diagnostics/BotTrace.h"
 #include "Helper/InventoryUtils.h"
+#include "Helper/ProgressionUtils.h"
+#include "Log.h"
+#include "ObjectAccessor.h"
+#include "Player.h"
 #include "Server/WorldSession.h"
 #include "World.h"
 #include "fmt/format.h"
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <deque>
 #include <random>
@@ -20,6 +28,12 @@ namespace Factory
     static std::vector<DeferredBotSpawn> s_deferredSpawns;
     static std::deque<PendingBotProvision> s_pendingProvisions;
     static std::unordered_map<std::string, BotDefinition> s_botDefinitions;
+    static uint32_t s_startupGraceRemainingMs = 0;
+    static uint32_t s_playerLoginGraceRemainingMs = 0;
+    static uint32_t s_loginLaunchCooldownRemainingMs = 0;
+    static uint32_t s_lastObservedPlayerSessionCount = 0;
+    static bool s_pausedForPlayerLogin = false;
+    static uint32_t s_playerQueueLogCooldownMs = 0;
 
     namespace
     {
@@ -104,7 +118,8 @@ namespace Factory
                 return 0;
             }
 
-            if (created)
+            if (created && Diagnostics::BotTrace::ShouldLog(
+                nullptr, Diagnostics::LogEvent::Normal))
                 TC_LOG_INFO("server", "[WorldBots] [Factory] Created isolated account '{}' (ID {}) for bot slot {}.",
                     accountName, accountId, slot);
             return accountId;
@@ -135,8 +150,12 @@ namespace Factory
             sCharacterCache->UpdateCharacterAccountId(guid, newAccountId);
             sWorld->UpdateRealmCharCount(oldAccountId);
             sWorld->UpdateRealmCharCount(newAccountId);
-            TC_LOG_INFO("server", "[WorldBots] [Factory] Moved managed character '{}' (GUID {}) from account {} to isolated bot account {}.",
-                botName, guid.GetCounter(), oldAccountId, newAccountId);
+            if (Diagnostics::BotTrace::ShouldLogGuid(
+                static_cast<uint32_t>(guid.GetCounter()), Diagnostics::LogEvent::Normal))
+            {
+                TC_LOG_INFO("server", "[WorldBots] [Factory] Moved managed character '{}' (GUID {}) from account {} to isolated bot account {}.",
+                    botName, guid.GetCounter(), oldAccountId, newAccountId);
+            }
             return true;
         }
     }
@@ -209,6 +228,26 @@ namespace Factory
         return static_cast<uint32_t>(s_deferredSpawns.size());
     }
 
+    uint32_t BotFactory::GetStartupGraceRemainingMs()
+    {
+        return s_startupGraceRemainingMs;
+    }
+
+    uint32_t BotFactory::GetLoginLaunchCooldownRemainingMs()
+    {
+        return s_loginLaunchCooldownRemainingMs;
+    }
+
+    uint32_t BotFactory::GetPlayerLoginGraceRemainingMs()
+    {
+        return s_playerLoginGraceRemainingMs;
+    }
+
+    bool BotFactory::IsPausedForPlayerLogin()
+    {
+        return s_pausedForPlayerLogin;
+    }
+
     void BotFactory::QueueBotLogin(uint32_t accountId, ObjectGuid guid,
         uint32_t delayMs, uint32_t attempt)
     {
@@ -250,8 +289,69 @@ namespace Factory
 
     void BotFactory::ProcessDeferredSpawns(uint32_t diff)
     {
+        s_startupGraceRemainingMs = s_startupGraceRemainingMs > diff
+            ? s_startupGraceRemainingMs - diff : 0;
+        s_playerLoginGraceRemainingMs = s_playerLoginGraceRemainingMs > diff
+            ? s_playerLoginGraceRemainingMs - diff : 0;
+        s_loginLaunchCooldownRemainingMs = s_loginLaunchCooldownRemainingMs > diff
+            ? s_loginLaunchCooldownRemainingMs - diff : 0;
+        s_playerQueueLogCooldownMs = s_playerQueueLogCooldownMs > diff
+            ? s_playerQueueLogCooldownMs - diff : 0;
+
+        uint32_t playerSessionCount = sWorld
+            ? sWorld->GetActiveAndQueuedSessionCount() : 0;
+        if (Config::BotConfig::PrioritizePlayerLogins() &&
+            playerSessionCount > s_lastObservedPlayerSessionCount)
+        {
+            s_playerLoginGraceRemainingMs =
+                Config::BotConfig::GetPlayerLoginGraceMs();
+            if (Diagnostics::BotTrace::ShouldLog(nullptr, Diagnostics::LogEvent::Normal))
+            {
+                TC_LOG_INFO("server", "[WorldBots] [Factory] Detected a new real-player session; pausing new bot work for {} ms so player login can complete first.",
+                    s_playerLoginGraceRemainingMs);
+            }
+        }
+        s_lastObservedPlayerSessionCount = playerSessionCount;
+
+        uint32_t queuedPlayerCount = sWorld ? sWorld->GetQueuedSessionCount() : 0;
+        s_pausedForPlayerLogin = Config::BotConfig::PrioritizePlayerLogins() &&
+            (s_playerLoginGraceRemainingMs != 0 || queuedPlayerCount != 0);
+        if (BotAuth::ShouldPauseBotProvisioning(s_startupGraceRemainingMs,
+            s_playerLoginGraceRemainingMs, queuedPlayerCount,
+            Config::BotConfig::PrioritizePlayerLogins()))
+        {
+            if (queuedPlayerCount != 0 && s_playerQueueLogCooldownMs == 0)
+            {
+                if (Diagnostics::BotTrace::ShouldLog(nullptr, Diagnostics::LogEvent::Normal))
+                {
+                    TC_LOG_INFO("server", "[WorldBots] [Factory] Pausing new bot provisioning and login launches while {} player session(s) wait for the realm.",
+                        queuedPlayerCount);
+                }
+                s_playerQueueLogCooldownMs = 5000;
+            }
+            return;
+        }
+
+        // Age every spawn that was already waiting before any budgeted work.
+        // Provisioning or launching one bot may consume the whole task budget
+        // (or deliberately break after a launch), but that must not freeze the
+        // timers of entries later in the queue.
+        for (DeferredBotSpawn& spawn : s_deferredSpawns)
+            spawn.delayMs = spawn.delayMs > diff ? spawn.delayMs - diff : 0;
+
+        const auto taskStarted = std::chrono::steady_clock::now();
+        const auto taskBudget = std::chrono::milliseconds(Config::BotConfig::GetFactoryTaskBudgetMs());
+        auto budgetExhausted = [&]() {
+            return std::chrono::steady_clock::now() - taskStarted >= taskBudget;
+        };
+        auto enqueueDeferredSpawn = [&](uint32_t accId, ObjectGuid botGuid, uint32_t slot) {
+            uint32_t spawnDelay = Config::BotConfig::GetBaseSpawnDelayMs() +
+                (slot * Config::BotConfig::GetSpawnDelayStepMs());
+            s_deferredSpawns.push_back({ accId, botGuid, spawnDelay });
+        };
+
         uint32_t operations = Config::BotConfig::GetFactoryOperationsPerTick();
-        while (operations-- > 0 && !s_pendingProvisions.empty())
+        while (operations-- > 0 && !s_pendingProvisions.empty() && !budgetExhausted())
         {
             PendingBotProvision provision = s_pendingProvisions.front();
             s_pendingProvisions.pop_front();
@@ -275,10 +375,17 @@ namespace Factory
 
             if (provision.persistent && guid)
             {
-                uint32_t spawnDelay = Config::BotConfig::GetBaseSpawnDelayMs() +
-                    (provision.slot * Config::BotConfig::GetSpawnDelayStepMs());
-                s_deferredSpawns.push_back({ accountId, guid, spawnDelay });
-                continue;
+                CharacterCacheEntry const* cacheEntry = sCharacterCache->GetCharacterCacheByGuid(guid);
+                if (cacheEntry && !Config::BotConfig::IsBotClassAllowed(cacheEntry->Class))
+                {
+                    TC_LOG_WARN("server", "[WorldBots] [Factory] Existing persistent bot '{}' has disallowed class {} (e.g. Death Knight disabled); deleting and recreating as allowed class {}.",
+                        botName, static_cast<uint32_t>(cacheEntry->Class), static_cast<uint32_t>(provision.definition.playerClass));
+                }
+                else
+                {
+                    enqueueDeferredSpawn(accountId, guid, provision.slot);
+                    continue;
+                }
             }
 
             if (guid)
@@ -288,9 +395,7 @@ namespace Factory
                 {
                     TC_LOG_WARN("server", "[WorldBots] [Factory] Bot '{}' is still active during provisioning; preserving it instead of recreating it.",
                         botName);
-                    uint32_t spawnDelay = Config::BotConfig::GetBaseSpawnDelayMs() +
-                        (provision.slot * Config::BotConfig::GetSpawnDelayStepMs());
-                    s_deferredSpawns.push_back({ accountId, guid, spawnDelay });
+                    enqueueDeferredSpawn(accountId, guid, provision.slot);
                     continue;
                 }
 
@@ -300,20 +405,21 @@ namespace Factory
             }
 
             guid = CreateFreshBotCharacter(botName, accountId, provision.definition,
-                Config::BotConfig::IsVerboseLoggingEnabled());
+                Diagnostics::BotTrace::IsGlobalVerbose());
             if (!guid)
                 continue;
 
-            uint32_t spawnDelay = Config::BotConfig::GetBaseSpawnDelayMs() +
-                (provision.slot * Config::BotConfig::GetSpawnDelayStepMs());
-            s_deferredSpawns.push_back({ accountId, guid, spawnDelay });
+            enqueueDeferredSpawn(accountId, guid, provision.slot);
         }
 
-        for (auto it = s_deferredSpawns.begin(); it != s_deferredSpawns.end(); )
+        for (auto it = s_deferredSpawns.begin();
+             it != s_deferredSpawns.end() && !budgetExhausted(); )
         {
-            if (it->delayMs <= diff)
+            if (it->delayMs == 0)
             {
-                if (BotAuth::GetPendingLoginCount() >= Config::BotConfig::GetMaxConcurrentLogins())
+                if (!BotAuth::CanLaunchBotLogin(s_loginLaunchCooldownRemainingMs,
+                    BotAuth::GetPendingLoginCount(),
+                    Config::BotConfig::GetMaxConcurrentLogins()))
                 {
                     it->delayMs = 0;
                     ++it;
@@ -327,9 +433,30 @@ namespace Factory
                     continue;
                 }
 
-                if (BotAuth::SpawnBotSession(it->accountId, it->guid, it->attempt))
+                BotAuth::SpawnSessionResult spawnResult =
+                    BotAuth::SpawnBotSession(it->accountId, it->guid, it->attempt);
+                if (spawnResult == BotAuth::SpawnSessionResult::Started ||
+                    spawnResult == BotAuth::SpawnSessionResult::AlreadyPending)
                 {
+                    bool launched = spawnResult == BotAuth::SpawnSessionResult::Started;
                     it = s_deferredSpawns.erase(it);
+                    if (launched)
+                    {
+                        s_loginLaunchCooldownRemainingMs =
+                            Config::BotConfig::GetLoginLaunchIntervalMs();
+                        // Enforce a launch-rate limit as well as the concurrent
+                        // pipeline cap. This prevents a batch of fast callbacks
+                        // from admitting another burst in the same world tick.
+                        break;
+                    }
+                }
+                else if (spawnResult == BotAuth::SpawnSessionResult::CancellationDraining)
+                {
+                    // Reinitialization leaves cancelled DB callbacks alive
+                    // until they reach their safe cleanup point. Retain the
+                    // replacement request without consuming a retry attempt.
+                    it->delayMs = std::max<uint32_t>(diff, 100u);
+                    ++it;
                 }
                 else
                 {
@@ -345,7 +472,6 @@ namespace Factory
             }
             else
             {
-                it->delayMs -= diff;
                 ++it;
             }
         }
@@ -354,6 +480,13 @@ namespace Factory
     ObjectGuid BotFactory::CreateFreshBotCharacter(std::string const& botName, uint32_t accountId,
         const BotDefinition& definition, bool verboseLogging)
     {
+        if (!Config::BotConfig::IsBotClassAllowed(definition.playerClass))
+        {
+            TC_LOG_ERROR("server", "[WorldBots] [Factory] Refusing to create bot '{}' with disabled class {}.",
+                botName, static_cast<uint32_t>(definition.playerClass));
+            return ObjectGuid::Empty;
+        }
+
         bool validName = !botName.empty() && botName.size() <= MAX_PLAYER_NAME &&
             std::all_of(botName.begin(), botName.end(), [](unsigned char c) { return std::isalpha(c) != 0; });
         if (!validName)
@@ -384,6 +517,7 @@ namespace Factory
         Helper::InventoryUtils::EnsureStarterBags(newPlayer,
             Config::BotConfig::GetStarterBagItemId(),
             Config::BotConfig::GetStarterBagCount());
+        Helper::ProgressionUtils::EnsureFactionFlightPathsLearned(newPlayer);
         newPlayer->SaveToDB(true);
 
         sCharacterCache->AddCharacterCacheEntry(newPlayer->GetGUID(), accountId, botName,
@@ -392,7 +526,8 @@ namespace Factory
 
         ObjectGuid guid = newPlayer->GetGUID();
 
-        if (verboseLogging)
+        if (verboseLogging || Diagnostics::BotTrace::ShouldLogGuid(
+            static_cast<uint32_t>(lowGuid), Diagnostics::LogEvent::Normal))
         {
             TC_LOG_INFO("server", "[WorldBots] [Factory] BotFactory: Created fresh character '{}' via Player::Create (GUID: {}, Account: {})", botName, lowGuid, accountId);
         }
@@ -417,6 +552,16 @@ namespace Factory
         s_deferredSpawns.clear();
         s_pendingProvisions.clear();
         s_botDefinitions.clear();
+        s_startupGraceRemainingMs = Config::BotConfig::GetFactoryStartupGraceMs();
+        s_playerLoginGraceRemainingMs = 0;
+        s_loginLaunchCooldownRemainingMs = 0;
+        s_lastObservedPlayerSessionCount = sWorld
+            ? sWorld->GetActiveAndQueuedSessionCount() : 0;
+        if (Config::BotConfig::PrioritizePlayerLogins() &&
+            s_lastObservedPlayerSessionCount != 0)
+            s_playerLoginGraceRemainingMs = Config::BotConfig::GetPlayerLoginGraceMs();
+        s_pausedForPlayerLogin = false;
+        s_playerQueueLogCooldownMs = 0;
 
         bool saveProgress = Config::BotConfig::ShouldSaveBotProgress();
         uint32_t persistentQuota = saveProgress
@@ -425,16 +570,17 @@ namespace Factory
         std::vector<BotDefinition> roster = Config::BotConfig::GetBotRoster();
         BotDefinition fallback = Config::BotConfig::GetDefaultBotDefinition();
 
-        TC_LOG_INFO("server", "[WorldBots] [Factory] Queued {} bot slot(s): {} persistent, {} disposable, {} account mode, {} operation(s) per factory tick, roster pattern length {}.",
+        TC_LOG_INFO("server", "[WorldBots] [Factory] Queued {} bot slot(s): {} persistent, {} disposable, {} account mode, {} operation(s) per factory tick, roster pattern length {}, startup grace {} ms, login launch interval {} ms.",
             botCount, persistentQuota, botCount - persistentQuota,
             Config::BotConfig::UseDedicatedAccounts() ? "dedicated" : "shared",
-            Config::BotConfig::GetFactoryOperationsPerTick(), roster.empty() ? 1 : roster.size());
+            Config::BotConfig::GetFactoryOperationsPerTick(), roster.empty() ? 1 : roster.size(),
+            s_startupGraceRemainingMs, Config::BotConfig::GetLoginLaunchIntervalMs());
 
         for (uint32_t i = 0; i < botCount; ++i)
         {
             BotDefinition definition = SelectBotDefinition(roster, i, fallback);
             s_botDefinitions[NormalizeBotName(GenerateBotName(i))] = definition;
-            s_pendingProvisions.push_back({ i, botCount, i < persistentQuota, definition });
+            s_pendingProvisions.push_back({ i, i < persistentQuota, definition });
         }
     }
 }

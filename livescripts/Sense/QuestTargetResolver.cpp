@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <limits>
 
-namespace Blackboard
+namespace Sense
 {
     uint64_t QuestTargetResolver::ItemSourceCacheKey(uint32_t questId, uint32_t itemId)
     {
@@ -26,7 +26,7 @@ namespace Blackboard
         return z > -50000.0f && z < 50000.0f ? z : fallbackZ;
     }
 
-    bool QuestTargetResolver::ResolveExplorationTarget(Player* bot, Quest const* quest, PositionInfo& position, float& radius)
+    bool QuestTargetResolver::ResolveExplorationTarget(Player* bot, Quest const* quest, Blackboard::PositionInfo& position, float& radius)
     {
         if (!bot || !quest || !sObjectMgr)
             return false;
@@ -105,24 +105,27 @@ namespace Blackboard
     }
 
     bool QuestTargetResolver::ResolveNearestQuestEnder(Player* bot, uint32_t questId, uint32_t& entry,
-        QuestTargetKind& kind, PositionInfo& position)
+        Blackboard::QuestTargetKind& kind, Blackboard::PositionInfo& position)
     {
         if (!bot)
             return false;
 
         float bestDistanceSq = std::numeric_limits<float>::max();
         bool found = false;
-        auto consider = [&](uint32_t candidateEntry, QuestTargetKind candidateKind) {
+        auto consider = [&](uint32_t candidateEntry, Blackboard::QuestTargetKind candidateKind) {
             float x = 0.0f, y = 0.0f, z = 0.0f;
             uint32_t mapId = 0;
-            bool located = candidateKind == QuestTargetKind::GameObject
-                ? Helper::FindGameObjectLocation(candidateEntry, x, y, z, mapId,
-                    bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId())
-                : Helper::FindNpcLocation(candidateEntry, x, y, z, mapId,
-                    bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId());
+            bool isGameObject = (candidateKind == Blackboard::QuestTargetKind::GameObject);
+            bool located = isGameObject
+                ? (Helper::FindGameObjectLocation(candidateEntry, x, y, z, mapId, bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId()) ||
+                   Helper::FindGameObjectLocation(candidateEntry, x, y, z, mapId, bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()))
+                : (Helper::FindNpcLocation(candidateEntry, x, y, z, mapId, bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId()) ||
+                   Helper::FindNpcLocation(candidateEntry, x, y, z, mapId, bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()));
             if (!located)
                 return;
             float distanceSq = Helper::DistanceSq2D(x, y, bot->GetPositionX(), bot->GetPositionY());
+            if (mapId != bot->GetMapId())
+                distanceSq += std::numeric_limits<float>::max() / 4.0f;
             if (distanceSq < bestDistanceSq)
             {
                 bestDistanceSq = distanceSq;
@@ -134,9 +137,9 @@ namespace Blackboard
         };
 
         for (uint32_t candidate : Cache::BotCache::GetQuestEnders(questId))
-            consider(candidate, QuestTargetKind::Creature);
+            consider(candidate, Blackboard::QuestTargetKind::Creature);
         for (uint32_t candidate : Cache::BotCache::GetGameObjectQuestEnders(questId))
-            consider(candidate, QuestTargetKind::GameObject);
+            consider(candidate, Blackboard::QuestTargetKind::GameObject);
         return found;
     }
 }

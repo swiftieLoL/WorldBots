@@ -3,21 +3,26 @@
 
 namespace Combat
 {
-    void PaladinStrategy::UpdateCombat(Player* bot, Unit* target, MovementManager* movement,
-        const Blackboard::BotBlackboard& blackboard, uint32_t deltaMs)
+    void PaladinStrategy::ExecuteCombat(Player* bot, Unit* target, MovementManager* movement,
+        const Blackboard::BotBlackboard& blackboard)
     {
-        if (!ClassStrategyUtils::IsValid(bot, target)) return;
-        _decisionTimer.Tick(deltaMs);
+        if (bot->IsNonMeleeSpellCast(false))
+            return;
+
         bool inMelee = ClassStrategyUtils::MaintainMelee(bot, target, movement);
-        if (bot->IsNonMeleeSpellCast(false) || !_decisionTimer.IsReady()) return;
+        if (!_decisionTimer.IsReady())
+            return;
 
         if (blackboard.self.healthPct < 25 &&
             ClassStrategyUtils::TryCastRank(bot, bot, 498, "Paladin", "Divine Protection"))
         { _decisionTimer.Set(1000); return; }
-        if (blackboard.self.healthPct < 40 &&
-            (ClassStrategyUtils::TryCastRank(bot, bot, 19750, "Paladin", "Flash of Light") ||
-             ClassStrategyUtils::TryCastRank(bot, bot, 635, "Paladin", "Holy Light")))
-        { if (movement) movement->Stop(); _decisionTimer.Set(1500); return; }
+        if (blackboard.self.healthPct < 40)
+        {
+            if (movement) movement->Stop();
+            if (ClassStrategyUtils::TryCastRank(bot, bot, 19750, "Paladin", "Flash of Light") ||
+                ClassStrategyUtils::TryCastRank(bot, bot, 635, "Paladin", "Holy Light"))
+            { _decisionTimer.Set(1500); return; }
+        }
 
         if (!Helper::SpellUtils::HasAuraInChain(bot, 21084) &&
             !Helper::SpellUtils::HasAuraInChain(bot, 20375) &&
@@ -30,10 +35,32 @@ namespace Combat
             ClassStrategyUtils::TryCastRank(bot, target, 24275, "Paladin", "Hammer of Wrath"))
         { _decisionTimer.Set(1000); return; }
 
-        static constexpr uint32_t priority[] = { 53385, 35395, 20271 };
-        static constexpr const char* names[] = { "Divine Storm", "Crusader Strike", "Judgement" };
-        for (size_t i = 0; i < std::size(priority); ++i)
-            if (ClassStrategyUtils::TryCastRank(bot, target, priority[i], "Paladin", names[i]))
-            { _decisionTimer.Set(1000); return; }
+        static constexpr ClassStrategyUtils::PrioritySpell prioritySpells[] = {
+            { 53385, "Divine Storm", 1000 },
+            { 35395, "Crusader Strike", 1000 },
+            { 20271, "Judgement", 1000 }
+        };
+        ClassStrategyUtils::TryCastPriorityList(bot, target, prioritySpells, "Paladin", _decisionTimer);
+    }
+
+    bool PaladinStrategy::ExecuteDisengageCC(
+        Player* bot,
+        Unit* threat,
+        const Blackboard::BotBlackboard& /*blackboard*/)
+    {
+        float dist = bot->GetDistance(threat);
+
+        if (dist <= 10.0f && ClassStrategyUtils::TryCastRank(bot, threat, 853, GetName(), "Hammer of Justice"))
+            return true;
+
+        if (!bot->HasAura(25771)) // Forbearance
+        {
+            if (bot->HasSpell(642) && ClassStrategyUtils::TryCast(bot, bot, 642, GetName(), "Divine Shield"))
+                return true;
+            if (bot->HasSpell(498) && ClassStrategyUtils::TryCast(bot, bot, 498, GetName(), "Divine Protection"))
+                return true;
+        }
+
+        return false;
     }
 }

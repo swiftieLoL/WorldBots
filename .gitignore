@@ -2,11 +2,8 @@
 /livescripts/build/
 /build/
 /out/
-/.agents/
-/.gemini/
-/tests/
-/docs/
 /cmake-build-*/
+/Testing/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -54,8 +51,10 @@ coverage/
 .env.*
 !.env.example
 
-# Logs, crashes, and temporary files
+# Diagnostics, logs, and runtime data
+worldbots-diagnostics/
 *.log
+*.tsv
 log.txt
 *.stackdump
 *.tmp
@@ -65,14 +64,13 @@ log.txt
 *.swo
 *~
 
-# Editors
-.idea/
-.vscode/
+# AI agent local metadata
+/.agents/
+/.gemini/
 
-# Operating system files
+# Operating system & editor files
 .DS_Store
 Thumbs.db
 Desktop.ini
-*.md
-ARCHITECTURE.md
-/docs
+.idea/
+.vscode/

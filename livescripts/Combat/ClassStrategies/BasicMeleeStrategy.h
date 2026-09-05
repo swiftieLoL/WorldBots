@@ -1,15 +1,16 @@
 #pragma once
 
-#include "IClassStrategy.h"
+#include "BaseCombatStrategy.h"
 
 namespace Combat
 {
-    class BasicMeleeStrategy : public IClassStrategy
+    class BasicMeleeStrategy : public BaseCombatStrategy
     {
     public:
         const char* GetName() const override { return "BasicMeleeStrategy"; }
 
-        void UpdateCombat(Player* bot, Unit* target, MovementManager* movement,
-            const Blackboard::BotBlackboard& blackboard, uint32_t deltaMs) override;
+    protected:
+        void ExecuteCombat(Player* bot, Unit* target, MovementManager* movement,
+            const Blackboard::BotBlackboard& blackboard) override;
     };
 }

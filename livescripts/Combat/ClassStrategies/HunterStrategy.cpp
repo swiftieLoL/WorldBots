@@ -1,9 +1,12 @@
 #include "HunterStrategy.h"
 
 #include "ClassStrategyUtils.h"
+#include "HunterCombatPolicy.h"
 #include "Combat/CombatPositioning.h"
+#include "Helper/HunterPetManagementPolicy.h"
 #include "Item.h"
 #include "ObjectAccessor.h"
+#include "Pet.h"
 #include "Spell.h"
 
 namespace Combat
@@ -26,14 +29,10 @@ namespace Combat
         }
     }
 
-    void HunterStrategy::UpdateCombat(Player* bot, Unit* target, MovementManager* movement,
-        const Blackboard::BotBlackboard& blackboard, uint32_t deltaMs)
+    void HunterStrategy::ExecuteCombat(Player* bot, Unit* target, MovementManager* movement,
+        const Blackboard::BotBlackboard& blackboard)
     {
-        if (!ClassStrategyUtils::IsValid(bot, target))
-            return;
-
         ObjectGuid targetGuid = target->GetGUID();
-        _decisionTimer.Tick(deltaMs);
         ClassStrategyUtils::EngagePet(bot, target);
 
         if (!bot->GetPet() && _decisionTimer.IsReady() &&
@@ -43,46 +42,45 @@ namespace Combat
             return;
         }
 
+        Pet* pet = bot->GetPet();
+        if (pet && _decisionTimer.IsReady() &&
+            Helper::HunterPetManagementPolicy::ShouldMend(
+                true, pet->IsAlive(),
+                pet->HealthBelowPct(Helper::HunterPetManagementPolicy::MendHealthPct),
+                Helper::SpellUtils::HasAuraInChain(pet, 136, bot->GetGUID())) &&
+            ClassStrategyUtils::TryCastRank(bot, pet, 136, StrategyName, "Mend Pet"))
+        {
+            _decisionTimer.Set(1500);
+            return;
+        }
+
         float distance = bot->GetDistance(target);
         bool canShoot = HasUsableAmmunition(bot);
 
-        // The reference playerbots implementation prioritizes a snare and
-        // disengage when a target enters the auto-shot dead zone.
-        if (distance < 8.0f)
+        // Auto-shot cannot handle the close-range dead zone. Switch to normal
+        // melee combat until the target moves back into ranged weapon range.
+        if (HunterCombatPolicy::ShouldUseMelee(distance, canShoot))
         {
-            if (_decisionTimer.IsReady() && !Helper::SpellUtils::HasAuraInChain(target, 2974) &&
+            bot->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
+            if (!ClassStrategyUtils::MaintainMelee(bot, target, movement) ||
+                bot->IsNonMeleeSpellCast(false) || !_decisionTimer.IsReady())
+                return;
+
+            if (!Helper::SpellUtils::HasAuraInChain(target, 2974) &&
                 ClassStrategyUtils::TryCastRank(bot, target, 2974, StrategyName, "Wing Clip"))
             {
                 _decisionTimer.Set(1000);
                 return;
             }
-            if (_decisionTimer.IsReady() &&
-                ClassStrategyUtils::TryCastRank(bot, bot, 781, StrategyName, "Disengage"))
-            {
-                _decisionTimer.Set(1000);
-                return;
-            }
 
-            CombatPositioning::MaintainRangeBand(bot, target, movement, 8.0f, 30.0f);
-            if (!canShoot)
-            {
-                if (ClassStrategyUtils::MaintainMelee(bot, target, movement) && _decisionTimer.IsReady() &&
-                    ClassStrategyUtils::TryCastRank(bot, target, 2973, StrategyName, "Raptor Strike"))
-                    _decisionTimer.Set(1000);
-            }
-            return;
-        }
-
-        if (!canShoot)
-        {
-            bot->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
-            if (ClassStrategyUtils::MaintainMelee(bot, target, movement) && _decisionTimer.IsReady() &&
-                ClassStrategyUtils::TryCastRank(bot, target, 2973, StrategyName, "Raptor Strike"))
+            if (ClassStrategyUtils::TryCastRank(bot, target, 2973, StrategyName, "Raptor Strike"))
                 _decisionTimer.Set(1000);
             return;
         }
 
-        RangeAdjustment range = CombatPositioning::MaintainRangeBand(bot, target, movement, 8.0f, 30.0f);
+        RangeAdjustment range = CombatPositioning::MaintainRangeBand(bot, target, movement,
+            HunterCombatPolicy::MinimumRangedDistance,
+            HunterCombatPolicy::MaximumReliableRangedDistance);
         if (range != RangeAdjustment::Hold || !bot->IsWithinLOSInMap(target))
             return;
 
@@ -112,38 +110,50 @@ namespace Combat
             }
         }
 
-        if (!Helper::SpellUtils::HasAuraInChain(target, 1130) &&
-            ClassStrategyUtils::TryCastRank(bot, target, 1130, StrategyName, "Hunter's Mark"))
-        {
-            _decisionTimer.Set(1000);
+        if (ClassStrategyUtils::TryMaintainAura(bot, target, 1130, StrategyName, "Hunter's Mark", _decisionTimer))
             return;
-        }
+
         if (target->HealthBelowPct(20) &&
             ClassStrategyUtils::TryCastRank(bot, target, 53351, StrategyName, "Kill Shot"))
         {
             _decisionTimer.Set(1000);
             return;
         }
-        if (!Helper::SpellUtils::HasAuraInChain(target, 1978) &&
-            ClassStrategyUtils::TryCastRank(bot, target, 1978, StrategyName, "Serpent Sting"))
-        {
-            _decisionTimer.Set(1000);
-            return;
-        }
 
-        static constexpr uint32_t priority[] = { 53209, 53301, 19434, 3044, 56641 };
-        static constexpr const char* names[] = { "Chimera Shot", "Explosive Shot", "Aimed Shot", "Arcane Shot", "Steady Shot" };
-        for (size_t index = 0; index < std::size(priority); ++index)
-        {
-            if (ClassStrategyUtils::TryCastRank(bot, target, priority[index], StrategyName, names[index]))
-            {
-                _decisionTimer.Set(1000);
-                return;
-            }
-        }
+        if (ClassStrategyUtils::TryMaintainAura(bot, target, 1978, StrategyName, "Serpent Sting", _decisionTimer))
+            return;
+
+        static constexpr ClassStrategyUtils::PrioritySpell prioritySpells[] = {
+            { 53209, "Chimera Shot", 1000 },
+            { 53301, "Explosive Shot", 1000 },
+            { 19434, "Aimed Shot", 1000 },
+            { 3044, "Arcane Shot", 1000 },
+            { 56641, "Steady Shot", 1000 }
+        };
+        if (ClassStrategyUtils::TryCastPriorityList(bot, target, prioritySpells, StrategyName, _decisionTimer))
+            return;
 
         target = ObjectAccessor::GetUnit(*bot, targetGuid);
         if (target && target->IsAlive())
             ClassStrategyUtils::EnsureAutoShot(bot, target);
+    }
+
+    bool HunterStrategy::ExecuteDisengageCC(
+        Player* bot,
+        Unit* threat,
+        const Blackboard::BotBlackboard& /*blackboard*/)
+    {
+        float dist = bot->GetDistance(threat);
+
+        if (bot->IsWithinMeleeRange(threat) && ClassStrategyUtils::TryCastRank(bot, threat, 2974, GetName(), "Wing Clip"))
+            return true;
+
+        if (dist <= 10.0f && bot->HasSpell(781) && ClassStrategyUtils::TryCast(bot, threat, 781, GetName(), "Disengage"))
+            return true;
+
+        if (dist >= 8.0f && dist <= 35.0f && ClassStrategyUtils::TryCastRank(bot, threat, 5116, GetName(), "Concussive Shot"))
+            return true;
+
+        return false;
     }
 }

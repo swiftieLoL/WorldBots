@@ -1,10 +1,10 @@
 #pragma once
 
-#include "BotAction.h"
+#include "BaseBotAction.h"
 
 namespace Actions
 {
-    class ResurrectAction : public BotAction
+    class ResurrectAction : public BaseBotAction
     {
     public:
         ResurrectAction();
@@ -14,10 +14,5 @@ namespace Actions
         void Start(Player* bot, MovementManager* movement) override;
         void Update(Player* bot, MovementManager* movement, const Blackboard::BotBlackboard& blackboard, uint32_t deltaMs) override;
         void Stop(Player* bot, MovementManager* movement) override;
-
-        bool IsComplete() const override { return _completed; }
-
-    private:
-        bool _completed;
     };
 }

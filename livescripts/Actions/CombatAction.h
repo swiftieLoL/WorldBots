@@ -1,13 +1,17 @@
 #pragma once
 
-#include "BotAction.h"
+#include "BaseBotAction.h"
 #include "ObjectGuid.h"
 #include "Combat/ClassStrategies/IClassStrategy.h"
+#include "Helper/CombatProgressWatchdog.h"
+#include "Helper/CombatStallRecoveryPolicy.h"
 #include <memory>
+
+class Creature;
 
 namespace Actions
 {
-    class CombatAction : public BotAction
+    class CombatAction : public BaseBotAction
     {
     public:
         CombatAction(ObjectGuid targetGuid);
@@ -18,12 +22,17 @@ namespace Actions
         void Update(Player* bot, MovementManager* movement, const Blackboard::BotBlackboard& blackboard, uint32_t deltaMs) override;
         void Stop(Player* bot, MovementManager* movement) override;
 
-        bool IsComplete() const override;
+        bool TryUpdateContext(Player* bot, const Blackboard::BotBlackboard& bb) override;
+        ObjectGuid GetRelatedTargetGuid() const override { return _targetGuid; }
 
     private:
+        void RecoverFromNoDamageStall(Player* bot, Creature* target,
+            MovementManager* movement);
+
         ObjectGuid _targetGuid;
         std::unique_ptr<Combat::IClassStrategy> _classStrategy;
-        bool _started;
-        bool _completed;
+        Helper::CombatProgressWatchdog _progressWatchdog;
+        Helper::CombatStallRecoveryPolicy _stallRecovery;
+        uint32_t _nonEngagementMs = 0;
     };
 }

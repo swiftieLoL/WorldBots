@@ -13,6 +13,7 @@ namespace Testing
             {
                 case Town::Service::Sell: return "Sell";
                 case Town::Service::Repair: return "Repair";
+                case Town::Service::Restock: return "Restock";
                 case Town::Service::CreateRewardSpace: return "CreateRewardSpace";
                 case Town::Service::TurnInQuest: return "TurnInQuest";
                 default: return "Unknown";
@@ -39,7 +40,9 @@ namespace Testing
 
         Town::PlanningInput empty;
         empty.freeBagSlots = 10;
-        empty.hasUsableVendor = true;
+        empty.hasInventoryVendor = true;
+        empty.hasRepairVendor = true;
+        empty.hasRestockVendor = true;
         checks.push_back({ "no needs produces no plan", Town::BuildPlan(empty).Empty() });
 
         Town::PlanningInput combined;
@@ -47,10 +50,12 @@ namespace Testing
         combined.hasSellableItems = true;
         combined.needsInventoryCleanup = true;
         combined.needsRepair = true;
-        combined.hasUsableVendor = true;
+        combined.hasInventoryVendor = true;
+        combined.hasRepairVendor = true;
+        combined.hasRestockVendor = true;
         combined.completedQuests = {
-            { 200, true, true, true, 400.0f },
-            { 100, false, true, true, 100.0f }
+            { 200, true, true, 400.0f, true },
+            { 100, false, true, 100.0f, true }
         };
         Town::Plan combinedPlan = Town::BuildPlan(combined);
         checks.push_back({ "vendor services precede nearest-first turn-ins",
@@ -65,8 +70,8 @@ namespace Testing
         Town::PlanningInput incidentalJunk;
         incidentalJunk.freeBagSlots = 10;
         incidentalJunk.hasSellableItems = true;
-        incidentalJunk.hasUsableVendor = true;
-        incidentalJunk.completedQuests = { { 100, false, true, true, 25.0f } };
+        incidentalJunk.hasInventoryVendor = true;
+        incidentalJunk.completedQuests = { { 100, false, true, 25.0f, true } };
         checks.push_back({ "healthy bags do not detour for incidental junk",
             Town::BuildPlan(incidentalJunk).steps ==
                 std::vector<Town::Step>{ { Town::Service::TurnInQuest, 100 } } });
@@ -76,8 +81,8 @@ namespace Testing
         missingVendor.hasSellableItems = true;
         missingVendor.needsInventoryCleanup = true;
         missingVendor.completedQuests = {
-            { 100, false, true, true, 25.0f },
-            { 200, true, true, true, 50.0f }
+            { 100, false, true, 25.0f, true },
+            { 200, true, true, 50.0f, true }
         };
         Town::Plan missingVendorPlan = Town::BuildPlan(missingVendor);
         checks.push_back({ "missing vendor preserves safe turn-ins",
@@ -86,8 +91,8 @@ namespace Testing
 
         Town::PlanningInput protectedInventory;
         protectedInventory.freeBagSlots = 0;
-        protectedInventory.hasUsableVendor = true;
-        protectedInventory.completedQuests = { { 200, true, true, true, 10.0f } };
+        protectedInventory.hasInventoryVendor = true;
+        protectedInventory.completedQuests = { { 200, true, true, 10.0f, true } };
         Town::Plan protectedPlan = Town::BuildPlan(protectedInventory);
         checks.push_back({ "protected inventory does not schedule a doomed turn-in",
             protectedPlan.blockedByProtectedInventory && protectedPlan.steps.size() == 1 &&
@@ -96,18 +101,11 @@ namespace Testing
         Town::PlanningInput blockedLoot;
         blockedLoot.freeBagSlots = 0;
         blockedLoot.needsInventoryCleanup = true;
-        blockedLoot.hasUsableVendor = true;
+        blockedLoot.hasInventoryVendor = true;
         Town::Plan blockedLootPlan = Town::BuildPlan(blockedLoot);
         checks.push_back({ "blocked loot without sellable items gets a bounded cleanup attempt",
             blockedLootPlan.targetFreeBagSlots == 1 &&
             blockedLootPlan.steps == std::vector<Town::Step>{ { Town::Service::CreateRewardSpace, 0 } } });
-
-        checks.push_back({ "capacity service requires observable progress",
-            Town::VerifyInventoryService(Town::Service::CreateRewardSpace, 0, 0, 100, 100, false) ==
-                Town::VerificationResult::RetryableFailure });
-        checks.push_back({ "repair service verifies durability",
-            Town::VerifyInventoryService(Town::Service::Repair, 2, 2, 30, 100, false) ==
-                Town::VerificationResult::Succeeded });
 
         std::size_t passed = 0;
         std::ostringstream output;

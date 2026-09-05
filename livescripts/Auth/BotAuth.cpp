@@ -1,11 +1,16 @@
-#include "Globals/ObjectMgr.h"
 #include "BotAuth.h"
 #include "Config/BotConfig.h"
+#include "DatabaseEnv.h"
+#include "Diagnostics/BotTrace.h"
+#include "Log.h"
 #include "ObjectAccessor.h"
+#include "Opcodes.h"
+#include "Globals/ObjectMgr.h"
+#include "Player.h"
+#include "WorldPacket.h"
 #include "World.h"
+#include <algorithm>
 #include <cstdio>
-
-class LoginQueryHolder;
 
 static std::vector<PendingBotInfo> s_pendingBots;
 struct TrackedBotSession
@@ -15,165 +20,20 @@ struct TrackedBotSession
 };
 static std::unordered_map<ObjectGuid, TrackedBotSession> s_botSessions;
 
-bool PlayerbotLoginQueryHolder::Initialize()
-{
-    SetSize(MAX_PLAYER_LOGIN_QUERY);
-
-    bool res = true;
-    ObjectGuid::LowType lowGuid = m_guid.GetCounter();
-
-    CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_FROM, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_GROUP_MEMBER);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_GROUP, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_INSTANCE);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_BOUND_INSTANCES, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_AURAS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_AURAS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_SPELL);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_SPELLS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_QUESTSTATUS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_QUEST_STATUS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_QUESTSTATUS_DAILY);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_DAILY_QUEST_STATUS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_QUESTSTATUS_WEEKLY);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_WEEKLY_QUEST_STATUS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_QUESTSTATUS_MONTHLY);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_MONTHLY_QUEST_STATUS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_QUESTSTATUS_SEASONAL);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_SEASONAL_QUEST_STATUS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_REPUTATION);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_REPUTATION, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_INVENTORY);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_INVENTORY, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_ACTIONS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_ACTIONS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MAIL);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_MAILS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MAILITEMS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_MAIL_ITEMS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_SOCIALLIST);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_SOCIAL_LIST, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_HOMEBIND);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_HOME_BIND, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_SPELLCOOLDOWNS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_SPELL_COOLDOWNS, stmt);
-
-    if (sWorld->getBoolConfig(CONFIG_DECLINED_NAMES_USED))
-    {
-        stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_DECLINEDNAMES);
-        stmt->setUInt32(0, lowGuid);
-        res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_DECLINED_NAMES, stmt);
-    }
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_GUILD_MEMBER);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_GUILD, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_ARENAINFO);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_ARENA_INFO, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_ACHIEVEMENTS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_ACHIEVEMENTS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_CRITERIAPROGRESS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_CRITERIA_PROGRESS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_EQUIPMENTSETS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_EQUIPMENT_SETS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_BGDATA);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_BG_DATA, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_GLYPHS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_GLYPHS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_TALENTS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_TALENTS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_PLAYER_ACCOUNT_DATA);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_ACCOUNT_DATA, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_SKILLS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_SKILLS, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_RANDOMBG);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_RANDOM_BG, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_BANNED);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_BANNED, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_QUESTSTATUSREW);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_QUEST_STATUS_REW, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CORPSE_LOCATION);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_CORPSE_LOCATION, stmt);
-
-    stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHAR_PETS);
-    stmt->setUInt32(0, lowGuid);
-    res &= SetPreparedQuery(PLAYER_LOGIN_QUERY_LOAD_PET_SLOTS, stmt);
-
-    return res;
-}
-
 namespace BotAuth
 {
-    bool SpawnBotSession(uint32_t accountId, ObjectGuid guid, uint32_t attempt)
+    SpawnSessionResult SpawnBotSession(uint32_t accountId, ObjectGuid guid, uint32_t attempt)
     {
         // A bot can be requested by both the factory and a lifecycle recovery
         // path. Only one login pipeline may exist for a GUID at a time.
         for (const auto& pending : s_pendingBots)
         {
             if (pending.guid == guid)
-                return true;
+            {
+                return pending.state && pending.state->cancelled.load(std::memory_order_acquire)
+                    ? SpawnSessionResult::CancellationDraining
+                    : SpawnSessionResult::AlreadyPending;
+            }
         }
 
         Player* existing = ObjectAccessor::FindPlayer(guid);
@@ -185,24 +45,33 @@ namespace BotAuth
             // The live session belongs to the world/session manager. Track it
             // for bot lookup, but never log it out or destroy it here.
             s_pendingBots.push_back({ existing->GetSession(), state, guid, accountId, attempt, 0, false });
-            TC_LOG_INFO("server", "[WorldBots] [Auth] Hot-reloaded active bot '{}' (GUID: {}) in world.", existing->GetName(), guid.GetCounter());
-            return true;
+            if (Diagnostics::BotTrace::ShouldLog(existing, Diagnostics::LogEvent::Normal))
+            {
+                TC_LOG_INFO("server", "[WorldBots] [Auth] Hot-reloaded active bot '{}' (GUID: {}) in world.", existing->GetName(), guid.GetCounter());
+            }
+            return SpawnSessionResult::Started;
         }
 
-        // Ensure character_homebind record exists in DB for this bot GUID.
-        // NOTE: INSERT IGNORE is lightweight and idempotent. Synchronous execution
-        // is acceptable here as it runs once per bot login, not in a hot loop.
-        std::string homebindQuery = fmt::format(
-            "INSERT IGNORE INTO character_homebind (guid, mapId, zoneId, posX, posY, posZ) VALUES ({}, 0, 12, -8949.95, -132.493, 83.5312)",
+        // Older WorldBots builds inserted the Human starting bind for every
+        // character. Remove that exact legacy row when it cannot be correct;
+        // Player::_LoadHomeBind will synchronously select the race/class start
+        // data and persist the proper bind as part of the native login path.
+        // Direct execution guarantees the repair completes before the async
+        // login query holder reads character_homebind.
+        std::string homebindRepair = fmt::format(
+            "DELETE hb FROM character_homebind hb "
+            "INNER JOIN characters c ON c.guid = hb.guid "
+            "WHERE hb.guid = {} "
+            "AND (c.`race` <> 1 OR c.`class` = 6) "
+            "AND hb.mapId = 0 AND hb.zoneId = 12 "
+            "AND ABS(hb.posX + 8949.95) < 0.1 "
+            "AND ABS(hb.posY + 132.493) < 0.1 "
+            "AND ABS(hb.posZ - 83.5312) < 0.1",
             guid.GetCounter());
-        CharacterDatabase.Execute(homebindQuery.c_str());
+        CharacterDatabase.DirectExecute(homebindRepair.c_str());
 
-        std::shared_ptr<PlayerbotLoginQueryHolder> holder = std::make_shared<PlayerbotLoginQueryHolder>(accountId, guid);
-        if (!holder->Initialize())
-        {
-            TC_LOG_ERROR("server", "[WorldBots] [Auth] Failed to initialize login query holder for bot guid {}", guid.GetCounter());
-            return false;
-        }
+        // Ensure any lingering session for this bot GUID is cleaned up before creating a new one
+        RemoveBotSession(guid);
 
         WorldSession* botSession = new WorldSession(accountId, "", nullptr, SEC_PLAYER, EXPANSION_WRATH_OF_THE_LICH_KING, time_t(0), Minutes(0), LOCALE_enUS, 0, false);
         botSession->m_timeOutTime = 2000000000;
@@ -210,17 +79,35 @@ namespace BotAuth
         auto state = std::make_shared<PendingBotState>();
         s_pendingBots.push_back({ botSession, state, guid, accountId, attempt, 0, true });
 
-        botSession->AddQueryHolderCallback(CharacterDatabase.DelayQueryHolder(std::static_pointer_cast<SQLQueryHolder<CharacterDatabaseConnection>>(holder))).AfterComplete([botSession, state](SQLQueryHolderBase const& queryHolder)
-        {
-            if (!state->cancelled.load(std::memory_order_acquire))
-            {
-                PlayerbotLoginQueryHolder const& holderRef = static_cast<PlayerbotLoginQueryHolder const&>(queryHolder);
-                const LoginQueryHolder& tcHolder = reinterpret_cast<const LoginQueryHolder&>(holderRef);
-                botSession->HandlePlayerLogin(tcHolder);
-            }
-            state->callbackFired.store(true, std::memory_order_release);
-        });
-        return true;
+        // LoginQueryHolder is private to TrinityCore's CharacterHandler.cpp,
+        // so constructing a lookalike holder and casting it to that unrelated
+        // type is undefined behavior. Populate the session's legitimate
+        // character set asynchronously, then enter the native login opcode;
+        // TrinityCore constructs and consumes its real holder internally.
+        CharacterDatabasePreparedStatement* enumStatement = CharacterDatabase.GetPreparedStatement(
+            sWorld->getBoolConfig(CONFIG_DECLINED_NAMES_USED)
+                ? CHAR_SEL_ENUM_DECLINED_NAME : CHAR_SEL_ENUM);
+        enumStatement->setUInt8(0, PET_SAVE_AS_CURRENT);
+        enumStatement->setUInt32(1, accountId);
+        botSession->GetQueryProcessor().AddCallback(
+            CharacterDatabase.AsyncQuery(enumStatement).WithPreparedCallback(
+                [botSession, state, guid](PreparedQueryResult result)
+                {
+                    if (state->cancelled.load(std::memory_order_acquire))
+                    {
+                        state->callbackFired.store(true, std::memory_order_release);
+                        return;
+                    }
+
+                    botSession->HandleCharEnum(result);
+                    state->loginDispatched.store(true, std::memory_order_release);
+                    WorldPacket loginPacket(CMSG_PLAYER_LOGIN, 8);
+                    loginPacket << guid;
+                    botSession->HandlePlayerLoginOpcode(loginPacket);
+                    if (!botSession->PlayerLoading())
+                        state->callbackFired.store(true, std::memory_order_release);
+                }));
+        return SpawnSessionResult::Started;
     }
 
     void UpdatePendingSessions(uint32_t diff,
@@ -248,6 +135,19 @@ namespace BotAuth
 
             if (it->state->cancelled.load(std::memory_order_acquire))
             {
+                // Socketless sessions own their callback processors. Keep
+                // draining them after cancellation so a ready enum/login
+                // callback can reach the deterministic cleanup point.
+                if (it->ownsSession &&
+                    !it->state->callbackFired.load(std::memory_order_acquire))
+                {
+                    BotSessionFilter updater(sess);
+                    sess->Update(diff, updater);
+                    if (it->state->loginDispatched.load(std::memory_order_acquire) &&
+                        !sess->PlayerLoading())
+                        it->state->callbackFired.store(true, std::memory_order_release);
+                }
+
                 // The query callback owns the final cleanup point. Keeping the
                 // entry until it fires avoids deleting a session while the DB
                 // callback still captures it.
@@ -258,7 +158,16 @@ namespace BotAuth
                     uint32_t attempt = it->attempt;
                     bool retryable = it->state->retryableFailure.load(std::memory_order_acquire);
                     if (it->ownsSession)
+                    {
+                        // A login callback may have completed immediately
+                        // before shutdown marked the entry cancelled. Tear
+                        // down a resulting player through the normal session
+                        // lifecycle rather than deleting its session out from
+                        // underneath the world object.
+                        if (sess->GetPlayer())
+                            sess->LogoutPlayer(true);
                         delete sess;
+                    }
                     it = s_pendingBots.erase(it);
                     if (retryable && onRetryableFailure)
                         onRetryableFailure(accountId, guid, attempt, "login timeout");
@@ -269,8 +178,18 @@ namespace BotAuth
                 continue;
             }
 
-            BotSessionFilter updater(sess);
-            sess->Update(diff, updater);
+            // Adopted sessions are already driven by the world's session
+            // loop. Updating them here as well can dispatch packets twice in
+            // the same tick. Only module-owned socketless sessions need this
+            // private update path.
+            if (it->ownsSession)
+            {
+                BotSessionFilter updater(sess);
+                sess->Update(diff, updater);
+                if (it->state->loginDispatched.load(std::memory_order_acquire) &&
+                    !sess->PlayerLoading())
+                    it->state->callbackFired.store(true, std::memory_order_release);
+            }
 
             if (sess->GetPlayer() && sess->GetPlayer()->IsInWorld())
             {
@@ -311,14 +230,23 @@ namespace BotAuth
         }
     }
 
-    WorldSession* GetBotSession(ObjectGuid guid)
+    SessionInfo GetBotSessionInfo(ObjectGuid guid)
     {
         auto it = s_botSessions.find(guid);
-        if (it != s_botSessions.end())
-        {
-            return it->second.session;
-        }
-        return nullptr;
+        if (it == s_botSessions.end())
+            return {};
+        return { it->second.session,
+            it->second.owned ? SessionOwnership::Owned : SessionOwnership::Adopted };
+    }
+
+    WorldSession* GetBotSession(ObjectGuid guid)
+    {
+        return GetBotSessionInfo(guid).session;
+    }
+
+    SessionOwnership GetSessionOwnership(ObjectGuid guid)
+    {
+        return GetBotSessionInfo(guid).ownership;
     }
 
     void RemoveBotSession(ObjectGuid guid)
@@ -345,5 +273,17 @@ namespace BotAuth
     uint32_t GetPendingLoginCount()
     {
         return static_cast<uint32_t>(s_pendingBots.size());
+    }
+
+    uint32_t GetOwnedSessionCount()
+    {
+        return static_cast<uint32_t>(std::count_if(s_botSessions.begin(), s_botSessions.end(),
+            [](const auto& entry) { return entry.second.owned; }));
+    }
+
+    uint32_t GetAdoptedSessionCount()
+    {
+        return static_cast<uint32_t>(std::count_if(s_botSessions.begin(), s_botSessions.end(),
+            [](const auto& entry) { return !entry.second.owned; }));
     }
 }

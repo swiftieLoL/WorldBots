@@ -1,5 +1,5 @@
-#include "Globals/ObjectMgr.h"
 #include "ClassStrategyFactory.h"
+#include "SharedDefines.h"
 #include "BasicMeleeStrategy.h"
 #include "WarriorStrategy.h"
 #include "MageStrategy.h"

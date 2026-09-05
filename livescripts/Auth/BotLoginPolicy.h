@@ -5,6 +5,22 @@
 
 namespace BotAuth
 {
+    inline bool ShouldPauseBotProvisioning(uint32_t startupGraceRemainingMs,
+        uint32_t playerLoginGraceRemainingMs, uint32_t queuedPlayerCount,
+        bool prioritizePlayerLogins)
+    {
+        return startupGraceRemainingMs != 0 ||
+            (prioritizePlayerLogins &&
+                (playerLoginGraceRemainingMs != 0 || queuedPlayerCount != 0));
+    }
+
+    inline bool CanLaunchBotLogin(uint32_t launchCooldownRemainingMs,
+        uint32_t pendingLoginCount, uint32_t maxConcurrentLogins)
+    {
+        return launchCooldownRemainingMs == 0 && maxConcurrentLogins != 0 &&
+            pendingLoginCount < maxConcurrentLogins;
+    }
+
     inline uint32_t CalculateRetryDelayMs(uint32_t attempt, uint32_t initialDelayMs,
         uint32_t maximumDelayMs)
     {

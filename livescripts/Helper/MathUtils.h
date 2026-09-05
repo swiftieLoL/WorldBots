@@ -3,8 +3,27 @@
 #include <cmath>
 #include <random>
 #include <algorithm>
+#if __has_include("Player.h")
+#if __has_include("Globals/ObjectMgr.h")
+#include "Globals/ObjectMgr.h"
+#endif
+#include "Player.h"
+#include "Map.h"
 
-class Map;
+namespace Helper
+{
+    inline float GetFloorZ(Player* bot, float x, float y, float z, float maxSearch = 50.0f)
+    {
+        if (Map* map = bot ? bot->GetMap() : nullptr)
+        {
+            float floorZ = map->GetHeight(bot->GetPhaseMask(), x, y, z, true, maxSearch);
+            if (floorZ > -500.0f && !std::isnan(floorZ))
+                return floorZ;
+        }
+        return z;
+    }
+}
+#endif
 
 namespace Helper
 {
@@ -14,11 +33,6 @@ namespace Helper
         float y = ay - by;
         float z = az - bz;
         return x * x + y * y + z * z;
-    }
-
-    inline float Distance(float ax, float ay, float az, float bx, float by, float bz)
-    {
-        return std::sqrt(DistanceSq(ax, ay, az, bx, by, bz));
     }
 
     inline float DistanceSq2D(float ax, float ay, float bx, float by)
@@ -33,15 +47,32 @@ namespace Helper
         return std::sqrt(DistanceSq2D(ax, ay, bx, by));
     }
 
+    inline float Distance3D(float ax, float ay, float az, float bx, float by, float bz)
+    {
+        return std::sqrt(DistanceSq(ax, ay, az, bx, by, bz));
+    }
+
     inline bool IsIn3DRange(float ax, float ay, float az, float bx, float by, float bz, float maxDistance)
     {
         return DistanceSq(ax, ay, az, bx, by, bz) <= (maxDistance * maxDistance);
     }
+}
 
-    inline bool IsIn2DRange(float ax, float ay, float bx, float by, float maxDistance)
+namespace Helper::HashUtils
+{
+    constexpr uint64_t FNV1aBasis = 1469598103934665603ULL;
+    constexpr uint64_t FNV1aPrime = 1099511628211ULL;
+
+    template <typename T>
+    inline void MixHash(uint64_t& hash, T value)
     {
-        return DistanceSq2D(ax, ay, bx, by) <= (maxDistance * maxDistance);
+        hash ^= static_cast<uint64_t>(value);
+        hash *= FNV1aPrime;
     }
+}
+
+namespace Helper
+{
 
     inline void GetRandomPointInAnnulus(float centerX, float centerY, float minRadius, float maxRadius, float& outX, float& outY)
     {

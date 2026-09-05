@@ -1,11 +1,6 @@
 #pragma once
 
-#include "Globals/ObjectMgr.h"
-#include "DatabaseEnv.h"
-#include "QueryHolder.h"
 #include "WorldSession.h"
-#include "Player.h"
-#include "Log.h"
 #include <cstdint>
 #include <atomic>
 #include <memory>
@@ -13,29 +8,14 @@
 #include <unordered_map>
 #include <functional>
 
-// Query holder for loading bot character data from character database during login
-class PlayerbotLoginQueryHolder : public SQLQueryHolder<CharacterDatabaseConnection>
-{
-private:
-    uint32 m_accountId;
-    ObjectGuid m_guid;
-public:
-    PlayerbotLoginQueryHolder(uint32 accountId, ObjectGuid guid)
-        : m_accountId(accountId), m_guid(guid)
-    {
-    }
-
-    ObjectGuid GetGuid() const { return m_guid; }
-    uint32 GetAccountId() const { return m_accountId; }
-
-    bool Initialize();
-};
+class Player;
 
 struct PendingBotState
 {
     std::atomic_bool callbackFired{ false };
     std::atomic_bool cancelled{ false };
     std::atomic_bool retryableFailure{ false };
+    std::atomic_bool loginDispatched{ false };
 };
 
 struct PendingBotInfo
@@ -59,11 +39,29 @@ public:
 
 namespace BotAuth
 {
-    // Shared account ID for bot-created characters
-    constexpr uint32 BOT_ACCOUNT_ID = 1;
+    enum class SpawnSessionResult : uint8_t
+    {
+        Started,
+        AlreadyPending,
+        CancellationDraining,
+        Failed
+    };
+
+    enum class SessionOwnership : uint8_t
+    {
+        None,
+        Owned,
+        Adopted
+    };
+
+    struct SessionInfo
+    {
+        WorldSession* session = nullptr;
+        SessionOwnership ownership = SessionOwnership::None;
+    };
 
     // Spawns a socketless WorldSession for the given accountId and character GUID
-    bool SpawnBotSession(uint32_t accountId, ObjectGuid guid, uint32_t attempt = 0);
+    SpawnSessionResult SpawnBotSession(uint32_t accountId, ObjectGuid guid, uint32_t attempt = 0);
 
     // Updates pending bot login sessions and invokes callback when a bot player enters the world
     void UpdatePendingSessions(uint32_t diff,
@@ -76,7 +74,11 @@ namespace BotAuth
     void CancelPendingSessions();
 
     // Session tracking helpers
+    SessionInfo GetBotSessionInfo(ObjectGuid guid);
     WorldSession* GetBotSession(ObjectGuid guid);
+    SessionOwnership GetSessionOwnership(ObjectGuid guid);
     void RemoveBotSession(ObjectGuid guid);
     uint32_t GetPendingLoginCount();
+    uint32_t GetOwnedSessionCount();
+    uint32_t GetAdoptedSessionCount();
 }

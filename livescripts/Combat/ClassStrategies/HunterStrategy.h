@@ -1,19 +1,19 @@
 #pragma once
 
-#include "IClassStrategy.h"
-#include "Helper/CommonTypes.h"
+#include "BaseCombatStrategy.h"
 
 namespace Combat
 {
-    class HunterStrategy : public IClassStrategy
+    class HunterStrategy : public BaseCombatStrategy
     {
     public:
         const char* GetName() const override { return "HunterStrategy"; }
 
-        void UpdateCombat(Player* bot, Unit* target, MovementManager* movement,
-            const Blackboard::BotBlackboard& blackboard, uint32_t deltaMs) override;
+    protected:
+        void ExecuteCombat(Player* bot, Unit* target, MovementManager* movement,
+            const Blackboard::BotBlackboard& blackboard) override;
 
-    private:
-        Common::CooldownTimer _decisionTimer;
+        bool ExecuteDisengageCC(Player* bot, Unit* threat,
+            const Blackboard::BotBlackboard& blackboard) override;
     };
 }

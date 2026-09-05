@@ -1,13 +1,13 @@
 #pragma once
 
-#include "ITask.h"
+#include <cstdint>
 #include <functional>
-#include <memory>
 #include <string>
+#include <algorithm>
 
 namespace Framework
 {
-    class ScheduledTask : public ITask
+    class ScheduledTask
     {
     public:
         using TaskCallback = std::function<void(uint32_t)>;
@@ -19,33 +19,31 @@ namespace Framework
         {
         }
 
-        uint32_t GetIntervalMs() const override { return _intervalMs; }
         const std::string& GetName() const { return _name; }
-        bool IsActive() const override { return _active; }
-        void SetActive(bool active) { _active = active; }
+        bool IsActive() const { return _active; }
 
         void Update(uint32_t diff)
         {
             if (!_active || _intervalMs == 0) return;
 
             _elapsedMs += diff;
-            uint32_t executions = 0;
-            while (_elapsedMs >= _intervalMs && executions < _maxCatchUpExecutions)
+            if (_elapsedMs >= _intervalMs)
             {
-                _elapsedMs -= _intervalMs;
-                ++executions;
+                uint32_t executions = std::min(_elapsedMs / _intervalMs, _maxCatchUpExecutions);
+                uint32_t stepMs = executions * _intervalMs;
+                _elapsedMs -= stepMs;
 
                 if (_callback)
                 {
-                    _callback(_intervalMs);
+                    _callback(stepMs);
                 }
-            }
 
-            // Preserve phase alignment, but drop an unbounded backlog after a
-            // long server hitch. This prevents the scheduler from turning one
-            // lag spike into a second main-thread spike.
-            if (_elapsedMs >= _intervalMs)
-                _elapsedMs %= _intervalMs;
+                // Preserve phase alignment, but drop an unbounded backlog after a
+                // long server hitch. This prevents the scheduler from turning one
+                // lag spike into a second main-thread spike.
+                if (_elapsedMs >= _intervalMs)
+                    _elapsedMs %= _intervalMs;
+            }
         }
 
     private:

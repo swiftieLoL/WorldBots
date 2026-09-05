@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <cstdint>
 
+#include "Brain/SuppressionRegistry.h"
+
 namespace Helper
 {
     class StuckDetector
@@ -19,11 +21,11 @@ namespace Helper
         bool Update(Player* bot, MovementManager* movement, Brain::BotGoal goal,
                     Blackboard::BotBlackboard& blackboard,
                     uint32_t activeQuestId,
-                    std::unordered_map<uint32_t, uint32_t>& blacklistedQuests,
-                    std::unordered_map<uint32_t, uint32_t>& blacklistedNpcs,
+                    Brain::SuppressionRegistry& suppressions,
                     uint32_t deltaMs);
 
         void Reset();
+        bool IsSevereStuck() const { return _isSevereStuck; }
 
     private:
         float _lastX = 0.0f;
@@ -38,5 +40,7 @@ namespace Helper
         float _stuckZoneZ = 0.0f;
         uint32_t _stuckZoneTimestampSec = 0;
         uint8_t _sameZoneStuckCount = 0;
+        uint32_t _stuckVendorEntry = 0;
+        bool _isSevereStuck = false;
     };
 }

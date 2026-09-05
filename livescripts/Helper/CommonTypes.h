@@ -5,6 +5,14 @@
 
 namespace Common
 {
+    enum class MovementFailsafeReason : uint8_t
+    {
+        None,
+        MovingNoProgress,
+        IdleNoProgress,
+        HardTimeout
+    };
+
     struct PositionInfo
     {
         float x = 0.0f;
@@ -41,6 +49,7 @@ namespace Common
         float lastY = 0.0f;
         float lastZ = 0.0f;
         bool hasPosition = false;
+        MovementFailsafeReason movementFailureReason = MovementFailsafeReason::None;
 
         bool Check(uint32_t deltaMs, uint32_t movingTimeoutMs, uint32_t idleTimeoutMs, bool isMoving)
         {
@@ -84,8 +93,36 @@ namespace Common
                 }
             }
 
-            return totalElapsedMs >= hardTimeoutMs ||
-                elapsedMs >= (isMoving ? movingNoProgressTimeoutMs : idleTimeoutMs);
+            if (totalElapsedMs >= hardTimeoutMs)
+            {
+                movementFailureReason = MovementFailsafeReason::HardTimeout;
+                return true;
+            }
+            if (elapsedMs >= (isMoving ? movingNoProgressTimeoutMs : idleTimeoutMs))
+            {
+                movementFailureReason = isMoving
+                    ? MovementFailsafeReason::MovingNoProgress
+                    : MovementFailsafeReason::IdleNoProgress;
+                return true;
+            }
+
+            movementFailureReason = MovementFailsafeReason::None;
+            return false;
+        }
+
+        const char* GetMovementFailureReason() const
+        {
+            switch (movementFailureReason)
+            {
+                case MovementFailsafeReason::MovingNoProgress:
+                    return "movement path made no positional progress";
+                case MovementFailsafeReason::IdleNoProgress:
+                    return "movement remained idle without progress";
+                case MovementFailsafeReason::HardTimeout:
+                    return "travel exceeded the hard action timeout";
+                default:
+                    return "travel failsafe triggered for an unknown reason";
+            }
         }
 
         void Reset()
@@ -93,6 +130,7 @@ namespace Common
             elapsedMs = 0;
             totalElapsedMs = 0;
             hasPosition = false;
+            movementFailureReason = MovementFailsafeReason::None;
         }
     };
 }

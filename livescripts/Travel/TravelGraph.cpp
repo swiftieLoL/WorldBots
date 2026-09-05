@@ -1,4 +1,5 @@
 #include "TravelGraph.h"
+#include "Helper/MathUtils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,6 +16,20 @@ namespace Travel
         constexpr uint32_t HomeNodeId = 0xFFFFFFFCu;
         constexpr float DirectWalkDistance = 650.0f;
         constexpr std::size_t ConnectorCount = 6;
+
+        bool CanDepartByWalking(TravelNodeKind kind)
+        {
+            // Reaching a portal source commits the route to its explicit
+            // portal edge. It must not become a cheap walk-through waypoint.
+            return kind != TravelNodeKind::Portal;
+        }
+
+        bool CanArriveByWalking(TravelNodeKind kind)
+        {
+            // A portal destination is a landing point, not a place a bot can
+            // assume is reachable from an adjacent room or outdoor node.
+            return kind != TravelNodeKind::PortalDestination;
+        }
 
         struct QueueEntry
         {
@@ -34,15 +49,11 @@ namespace Travel
 
     uint64_t TravelGraph::MakeEdgeKey(uint32_t from, uint32_t to, TravelMode mode, uint32_t reference)
     {
-        uint64_t key = 1469598103934665603ULL;
-        auto mix = [&key](uint64_t value) {
-            key ^= value;
-            key *= 1099511628211ULL;
-        };
-        mix(from);
-        mix(to);
-        mix(static_cast<uint8_t>(mode));
-        mix(reference);
+        uint64_t key = Helper::HashUtils::FNV1aBasis;
+        Helper::HashUtils::MixHash(key, from);
+        Helper::HashUtils::MixHash(key, to);
+        Helper::HashUtils::MixHash(key, static_cast<uint8_t>(mode));
+        Helper::HashUtils::MixHash(key, reference);
         return key;
     }
 
@@ -64,10 +75,16 @@ namespace Travel
     {
         if (left.mapId != right.mapId)
             return std::numeric_limits<float>::max();
-        float dx = left.x - right.x;
-        float dy = left.y - right.y;
-        float dz = left.z - right.z;
-        return std::sqrt(dx * dx + dy * dy + dz * dz);
+        return Helper::Distance3D(left.x, left.y, left.z, right.x, right.y, right.z);
+    }
+
+    bool TravelGraph::IsGlobalPortalTransition(const Common::PositionInfo& source,
+        const Common::PositionInfo& destination)
+    {
+        // Local teleports such as the Stormwind Mage Tower entrance and exit
+        // are interior navigation, not world-travel shortcuts. Treating them
+        // as graph anchors can strand a bot on an isolated navmesh island.
+        return source.mapId != destination.mapId;
     }
 
     const TravelNode* TravelGraph::GetNode(uint32_t id) const
@@ -79,11 +96,15 @@ namespace Travel
     {
         for (const TravelNode& from : _nodes)
         {
+            if (!CanDepartByWalking(from.kind))
+                continue;
+
             std::vector<std::pair<float, uint32_t>> nearest;
             nearest.reserve(_nodes.size());
             for (const TravelNode& to : _nodes)
             {
-                if (from.id == to.id || from.position.mapId != to.position.mapId)
+                if (from.id == to.id || from.position.mapId != to.position.mapId ||
+                    !CanArriveByWalking(to.kind))
                     continue;
                 float distance = Distance(from.position, to.position);
                 if (std::isfinite(distance))
@@ -127,7 +148,16 @@ namespace Travel
             std::vector<std::pair<float, uint32_t>> nearest;
             for (uint32_t i = 0; i < _nodes.size(); ++i)
             {
+                if (options.blockedNodes.contains(nodes[i].id))
+                    continue;
+                if (nodes[i].kind == TravelNodeKind::FlightMaster &&
+                    !options.usableTaxiNodes.contains(nodes[i].reference))
+                    continue;
                 if (nodes[i].position.mapId != nodes[dynamicIndex].position.mapId)
+                    continue;
+                if (outgoing && !CanArriveByWalking(nodes[i].kind))
+                    continue;
+                if (!outgoing && !CanDepartByWalking(nodes[i].kind))
                     continue;
                 nearest.emplace_back(Distance(nodes[i].position, nodes[dynamicIndex].position), i);
             }
@@ -141,22 +171,49 @@ namespace Travel
                 else
                     addDynamicEdge(nodeIndex, dynamicIndex, TravelMode::Walk, distance);
             }
+            return !nearest.empty();
         };
 
-        connectToNearest(startIndex, true);
-        connectToNearest(destinationIndex, false);
-        if (homeIndex != std::numeric_limits<uint32_t>::max())
+        if (!options.localGroundOnly)
         {
-            addDynamicEdge(startIndex, homeIndex, TravelMode::Hearthstone, 20.0f);
+            connectToNearest(startIndex, true);
+            connectToNearest(destinationIndex, false);
+        }
+        if (homeIndex != std::numeric_limits<uint32_t>::max() &&
+            !options.localGroundOnly)
+        {
+            float startToDest = (start.mapId == destination.mapId)
+                ? Distance(start, destination) : std::numeric_limits<float>::max();
+            float homeToDest = (options.home.mapId == destination.mapId)
+                ? Distance(options.home, destination) : std::numeric_limits<float>::max();
+
+            // Hearthstone should only be considered if it brings the bot significantly
+            // closer to the destination than current position, or transfers to destination map.
+            if (options.home.mapId == destination.mapId &&
+                (start.mapId != destination.mapId || homeToDest < startToDest - 150.0f))
+            {
+                addDynamicEdge(startIndex, homeIndex, TravelMode::Hearthstone, 120.0f);
+            }
+
             connectToNearest(homeIndex, true);
-            if (options.home.mapId == destination.mapId && Distance(options.home, destination) <= DirectWalkDistance)
+            if (options.home.mapId == destination.mapId &&
+                Distance(options.home, destination) <= DirectWalkDistance)
+            {
                 addDynamicEdge(homeIndex, destinationIndex, TravelMode::Walk, Distance(options.home, destination));
+            }
         }
 
-        if (start.mapId == destination.mapId &&
-            (Distance(start, destination) <= DirectWalkDistance || _nodes.empty()))
+        if (start.mapId == destination.mapId)
         {
-            addDynamicEdge(startIndex, destinationIndex, TravelMode::Walk, Distance(start, destination));
+            constexpr float MaxDirectWalkDistance = 6000.0f;
+            float directDist = Distance(start, destination);
+            if (directDist <= MaxDirectWalkDistance)
+            {
+                // Always attempt the real ground route before using graph anchors
+                // on the same map if within reasonable direct walking range.
+                addDynamicEdge(startIndex, destinationIndex, TravelMode::Walk,
+                    directDist <= DirectWalkDistance ? 1.0f : directDist);
+            }
         }
 
         std::vector<std::vector<uint32_t>> adjacency(nodes.size());
@@ -187,12 +244,22 @@ namespace Travel
                 const TravelEdge& edge = edges[edgeIndex];
                 if (options.blockedEdges.contains(edge.key))
                     continue;
+                const TravelNode& fromNode = nodes[edge.from];
+                const TravelNode& toNode = nodes[edge.to];
+                if (options.blockedNodes.contains(fromNode.id) ||
+                    options.blockedNodes.contains(toNode.id))
+                    continue;
+                if ((fromNode.kind == TravelNodeKind::FlightMaster &&
+                     !options.usableTaxiNodes.contains(fromNode.reference)) ||
+                    (toNode.kind == TravelNodeKind::FlightMaster &&
+                     !options.usableTaxiNodes.contains(toNode.reference)))
+                    continue;
                 if (edge.mode == TravelMode::FlightPath)
                 {
-                    uint32_t sourceTaxi = nodes[edge.from].reference;
-                    uint32_t destinationTaxi = nodes[edge.to].reference;
-                    if (!options.knownTaxiNodes.contains(sourceTaxi) ||
-                        !options.knownTaxiNodes.contains(destinationTaxi))
+                    uint32_t sourceTaxi = fromNode.reference;
+                    uint32_t destinationTaxi = toNode.reference;
+                    if (!options.usableTaxiNodes.contains(sourceTaxi) ||
+                        !options.usableTaxiNodes.contains(destinationTaxi))
                     {
                         continue;
                     }

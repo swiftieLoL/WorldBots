@@ -1,4 +1,3 @@
-#include "Globals/ObjectMgr.h"
 #include "CombatPositioning.h"
 #include "Helper/MovementManager.h"
 #include "Player.h"
@@ -7,26 +6,13 @@
 
 namespace Combat
 {
-    bool CombatPositioning::MaintainRanged(Player* bot, Unit* target, MovementManager* movement, float maximumRange)
+    namespace
     {
-        if (!bot || !target)
-            return false;
-
-        bool hasLineOfSight = bot->IsWithinLOSInMap(target);
-        if (bot->GetDistance(target) > maximumRange || !hasLineOfSight)
+        bool HasActiveCast(Player* bot)
         {
-            if (movement)
-                movement->MoveTo(target->GetPositionX(), target->GetPositionY(), target->GetPositionZ(),
-                    BotMovementState::Moving, false);
+            return bot && (bot->HasUnitState(UNIT_STATE_CASTING) ||
+                bot->IsNonMeleeSpellCast(false));
         }
-        else
-        {
-            if (movement)
-                movement->Stop();
-            bot->SetInFront(target);
-        }
-
-        return hasLineOfSight;
     }
 
     RangeAdjustment CombatPositioning::MaintainRangeBand(Player* bot, Unit* target,
@@ -37,8 +23,12 @@ namespace Combat
 
         bool hasLineOfSight = bot->IsWithinLOSInMap(target);
         float distance = bot->GetDistance(target);
+        bool preserveActiveCast = HasActiveCast(bot);
         RangeAdjustment adjustment = ChooseRangeAdjustment(
-            distance, minimumRange, maximumRange, hasLineOfSight);
+            distance, minimumRange, maximumRange, hasLineOfSight, preserveActiveCast);
+
+        if (preserveActiveCast)
+            return adjustment;
 
         if (adjustment == RangeAdjustment::CloseDistance)
         {
@@ -53,8 +43,10 @@ namespace Combat
             float length = std::sqrt(dx * dx + dy * dy);
             if (length < 0.1f)
             {
-                dx = std::cos(bot->GetOrientation());
-                dy = std::sin(bot->GetOrientation());
+                // Orientation faces toward target; add PI to retreat away
+                float awayAngle = bot->GetOrientation() + static_cast<float>(M_PI);
+                dx = std::cos(awayAngle);
+                dy = std::sin(awayAngle);
                 length = 1.0f;
             }
 

@@ -28,11 +28,11 @@ namespace Framework
 
     void Scheduler::Update(uint32_t diff)
     {
-        for (auto& task : _tasks)
+        for (size_t i = 0; i < _tasks.size(); ++i)
         {
-            if (task && task->IsActive())
+            if (i < _tasks.size() && _tasks[i] && _tasks[i]->IsActive())
             {
-                task->Update(diff);
+                _tasks[i]->Update(diff);
             }
         }
     }

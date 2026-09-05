@@ -22,6 +22,7 @@ This document summarizes key technical insights, gotchas, architecture rules, an
   - Precompiled Headers (`pch.h` / `livescripts.h`) must be preserved across module rebuilds to maintain short compile times.
   - When adding new C++ source files under `modules/<ModuleName>/livescripts/`, ensure they are added to `CMakeLists.txt` or included in the module's main entry point.
   - Submodules must be synchronized via `git submodule update --init --recursive` when cloning or updating core dependencies.
+  - **Player.h & ObjectMgr.h Dependency**: In TSWoW's modified `Player.h`, the inline method `HasRunes()` directly dereferences `sObjectMgr`. Consequently, any module source or header file including `#include "Player.h"` MUST include `#include "Globals/ObjectMgr.h"` prior to `Player.h` to avoid `error C2065: 'sObjectMgr': undeclared identifier`.
 
 ---
 

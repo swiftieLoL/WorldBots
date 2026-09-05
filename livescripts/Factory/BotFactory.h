@@ -1,11 +1,6 @@
 #pragma once
 
-#include "Globals/ObjectMgr.h"
-#include "DatabaseEnv.h"
-#include "ObjectAccessor.h"
-#include "Player.h"
 #include "Server/WorldSession.h"
-#include "Log.h"
 #include "BotRoster.h"
 #include <cstdint>
 #include <string>
@@ -42,7 +37,6 @@ namespace Factory
     struct PendingBotProvision
     {
         uint32_t slot = 0;
-        uint32_t totalSlots = 0;
         bool persistent = true;
         BotDefinition definition;
     };
@@ -73,6 +67,10 @@ namespace Factory
         static BotDefinition GetBotDefinition(std::string const& botName);
         static uint32_t GetPendingProvisionCount();
         static uint32_t GetPendingSpawnCount();
+        static uint32_t GetStartupGraceRemainingMs();
+        static uint32_t GetPlayerLoginGraceRemainingMs();
+        static uint32_t GetLoginLaunchCooldownRemainingMs();
+        static bool IsPausedForPlayerLogin();
 
         // Helper string normalizers
         static std::string NormalizeBotName(std::string name);

@@ -1,94 +1,73 @@
-#include "Globals/ObjectMgr.h"
-#include "ObjectAccessor.h"
 #include "PriestStrategy.h"
 #include "Combat/CombatPositioning.h"
-#include "Helper/SpellUtils.h"
-#include "Log.h"
-#include "Diagnostics/BotTrace.h"
+#include "ClassStrategyUtils.h"
 
 namespace Combat
 {
-    void PriestStrategy::UpdateCombat(
+    void PriestStrategy::ExecuteCombat(
         Player* bot,
         Unit* target,
         MovementManager* movement,
-        const Blackboard::BotBlackboard& blackboard,
-        uint32_t deltaMs)
+        const Blackboard::BotBlackboard& blackboard)
     {
-        if (!bot || !target || !target->IsAlive()) return;
-        ObjectGuid targetGuid = target->GetGUID();
-
-        _cooldownTimer.Tick(deltaMs);
 
         uint8_t healthPct = blackboard.self.healthPct;
 
         // 1. Emergency Self Healing Priority
-        if (healthPct < 50 && _cooldownTimer.IsReady())
+        if (healthPct < 50 && _decisionTimer.IsReady())
         {
-            uint32_t shieldToCast = Helper::SpellUtils::FindReadyRank(bot, 17);
-            bool hasShield = Helper::SpellUtils::HasAuraInChain(bot, 17);
-
-            if (shieldToCast != 0 && !hasShield && !bot->HasAura(6788)) // Weakened Soul
+            if (!bot->HasAura(6788)) // Weakened Soul
             {
-                bot->CastSpell(bot, shieldToCast, false);
-                _cooldownTimer.Set(1500);
-                if (Diagnostics::BotTrace::ShouldLog(bot))
-                    TC_LOG_INFO("server", "[WorldBots] [Combat] Priest Bot '{}' cast Power Word: Shield (Spell {})!", bot->GetName(), shieldToCast);
-                return;
+                if (ClassStrategyUtils::TryMaintainAura(bot, bot, 17, GetName(), "Power Word: Shield", _decisionTimer, 1500))
+                    return;
             }
 
-            uint32_t healSpell = Helper::SpellUtils::FindReadyRank(bot, 2061);
-
+            uint32_t healSpell = Helper::SpellUtils::IsSpellReady(bot, 2061) ? 2061
+                : (Helper::SpellUtils::IsSpellReady(bot, 2050) ? 2050 : 0);
             if (healSpell != 0)
             {
                 if (movement) movement->Stop();
-                bot->CastSpell(bot, healSpell, false);
-                _cooldownTimer.Set(2500);
-                if (Diagnostics::BotTrace::ShouldLog(bot))
-                    TC_LOG_INFO("server", "[WorldBots] [Combat] Priest Bot '{}' cast Heal Spell ID {}!", bot->GetName(), healSpell);
-                return;
+                const char* healName = (healSpell == 2061) ? "Flash Heal" : "Lesser Heal";
+                if (ClassStrategyUtils::TryCastRank(bot, bot, healSpell, GetName(), healName))
+                {
+                    _decisionTimer.Set(2500);
+                    return;
+                }
             }
         }
 
-        bool hasLineOfSight = CombatPositioning::MaintainRanged(bot, target, movement, 28.0f);
+        RangeAdjustment range = CombatPositioning::MaintainRangeBand(bot, target, movement, 0.0f, 28.0f);
 
-        if (!hasLineOfSight)
+        if (range != RangeAdjustment::Hold)
             return;
 
-        if (bot->IsNonMeleeSpellCast(false) || !_cooldownTimer.IsReady()) return;
+        if (bot->IsNonMeleeSpellCast(false) || !_decisionTimer.IsReady())
+            return;
 
         // 2. Shadow Word: Pain dot maintenance
-        uint32_t swpToCast = Helper::SpellUtils::FindReadyRank(bot, 589);
-        bool hasSwp = Helper::SpellUtils::HasAuraInChain(target, 589);
-
-        if (swpToCast != 0 && !hasSwp)
-        {
-            std::string targetName = target->GetName();
-            bot->CastSpell(target, swpToCast, false);
-            _cooldownTimer.Set(1500);
-            if (Diagnostics::BotTrace::ShouldLog(bot))
-                TC_LOG_INFO("server", "[WorldBots] [Combat] Priest Bot '{}' cast Shadow Word: Pain (Spell {}) on '{}'", bot->GetName(), swpToCast, targetName);
+        if (ClassStrategyUtils::TryMaintainAura(bot, target, 589, GetName(), "Shadow Word: Pain", _decisionTimer, 1500))
             return;
-        }
 
         // 3. Smite nuke
-        uint32_t smiteToCast = Helper::SpellUtils::FindReadyRank(bot, 585);
-
-        if (smiteToCast != 0)
+        if (ClassStrategyUtils::TryCastRank(bot, target, 585, GetName(), "Smite"))
         {
-            std::string targetName = target->GetName();
-            bot->CastSpell(target, smiteToCast, false);
-            _cooldownTimer.Set(1500);
-            if (Diagnostics::BotTrace::ShouldLog(bot))
-                TC_LOG_INFO("server", "[WorldBots] [Combat] Priest Bot '{}' cast Smite (Spell {}) on '{}'", bot->GetName(), smiteToCast, targetName);
+            _decisionTimer.Set(1500);
             return;
         }
+    }
 
-        if (bot->GetVictim() != target)
-        {
-            bot->Attack(target, true);
-        }
-        target = ObjectAccessor::GetUnit(*bot, targetGuid);
-        if (!target || !target->IsAlive()) return;
+    bool PriestStrategy::ExecuteDisengageCC(
+        Player* bot,
+        Unit* threat,
+        const Blackboard::BotBlackboard& /*blackboard*/)
+    {
+        float dist = bot->GetDistance(threat);
+        if (dist <= 8.0f && ClassStrategyUtils::TryCastRank(bot, threat, 8122, GetName(), "Psychic Scream"))
+            return true;
+
+        if (!bot->HasAura(6788) && ClassStrategyUtils::TryCastRank(bot, bot, 17, GetName(), "Power Word: Shield"))
+            return true;
+
+        return false;
     }
 }

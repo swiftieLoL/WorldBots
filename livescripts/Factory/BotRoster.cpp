@@ -32,46 +32,6 @@ namespace Factory
             return true;
         }
 
-        bool IsPlayableRace(uint8_t race)
-        {
-            switch (race)
-            {
-                case 1:  // Human
-                case 2:  // Orc
-                case 3:  // Dwarf
-                case 4:  // Night Elf
-                case 5:  // Undead
-                case 6:  // Tauren
-                case 7:  // Gnome
-                case 8:  // Troll
-                case 10: // Blood Elf
-                case 11: // Draenei
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        bool IsPlayableClass(uint8_t playerClass)
-        {
-            switch (playerClass)
-            {
-                case 1:  // Warrior
-                case 2:  // Paladin
-                case 3:  // Hunter
-                case 4:  // Rogue
-                case 5:  // Priest
-                case 6:  // Death Knight
-                case 7:  // Shaman
-                case 8:  // Mage
-                case 9:  // Warlock
-                case 11: // Druid
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
         bool ParseBehaviorProfile(std::string_view value, BehaviorProfile& profile)
         {
             std::string normalized(Trim(value));
@@ -105,6 +65,54 @@ namespace Factory
         }
     }
 
+    bool IsPlayableRaceClassCombination(uint8_t race, uint8_t playerClass)
+    {
+        // WotLK 3.3.5 character-creation matrix. Death Knights are available
+        // to every playable race; the remaining masks reflect the original
+        // pre-Cataclysm class restrictions.
+        switch (race)
+        {
+            case 1:  return playerClass == 1 || playerClass == 2 || playerClass == 4 ||
+                playerClass == 5 || playerClass == 6 || playerClass == 8 || playerClass == 9;
+            case 2:  return playerClass == 1 || playerClass == 3 || playerClass == 4 ||
+                playerClass == 6 || playerClass == 7 || playerClass == 9;
+            case 3:  return playerClass >= 1 && playerClass <= 6;
+            case 4:  return playerClass == 1 || playerClass == 3 || playerClass == 4 ||
+                playerClass == 5 || playerClass == 6 || playerClass == 11;
+            case 5:  return playerClass == 1 || playerClass == 4 || playerClass == 5 ||
+                playerClass == 6 || playerClass == 8 || playerClass == 9;
+            case 6:  return playerClass == 1 || playerClass == 3 || playerClass == 6 ||
+                playerClass == 7 || playerClass == 11;
+            case 7:  return playerClass == 1 || playerClass == 4 || playerClass == 6 ||
+                playerClass == 8 || playerClass == 9;
+            case 8:  return playerClass == 1 || playerClass == 3 || playerClass == 4 ||
+                playerClass == 5 || playerClass == 6 || playerClass == 7 || playerClass == 8;
+            case 10: return playerClass == 2 || playerClass == 3 || playerClass == 4 ||
+                playerClass == 5 || playerClass == 6 || playerClass == 8 || playerClass == 9;
+            case 11: return playerClass == 1 || playerClass == 2 || playerClass == 3 ||
+                playerClass == 5 || playerClass == 6 || playerClass == 7 || playerClass == 8;
+            default: return false;
+        }
+    }
+
+    std::vector<BotDefinition> CreateFullCoverageRoster(BehaviorProfile profile)
+    {
+        constexpr std::array<uint8_t, 10> races = { 1, 2, 3, 4, 5, 6, 7, 8, 10, 11 };
+        constexpr std::array<uint8_t, 10> classes = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 11 };
+
+        std::vector<BotDefinition> result;
+        result.reserve(62);
+        for (uint8_t race : races)
+        {
+            for (uint8_t playerClass : classes)
+            {
+                if (IsPlayableRaceClassCombination(race, playerClass))
+                    result.push_back({ race, playerClass, 0, profile });
+            }
+        }
+        return result;
+    }
+
     std::vector<BotDefinition> ParseBotRoster(std::string_view value,
         std::vector<std::string>* errors)
     {
@@ -119,6 +127,24 @@ namespace Factory
 
             if (entry.empty())
                 continue;
+
+            if (entry == "all" || entry.starts_with("all:"))
+            {
+                BehaviorProfile profile = BehaviorProfile::Balanced;
+                bool valid = entry == "all" ||
+                    ParseBehaviorProfile(entry.substr(4), profile);
+                if (!valid)
+                {
+                    if (errors)
+                        errors->push_back("roster entry " + std::to_string(entryNumber) +
+                            " must use all[:balanced|cautious|questing|stress]");
+                    continue;
+                }
+
+                std::vector<BotDefinition> fullCoverage = CreateFullCoverageRoster(profile);
+                result.insert(result.end(), fullCoverage.begin(), fullCoverage.end());
+                continue;
+            }
 
             std::array<std::string_view, 4> fields{};
             size_t fieldCount = 0;
@@ -135,14 +161,14 @@ namespace Factory
                 ParseByte(fields[1], definition.playerClass) &&
                 ParseByte(fields[2], definition.gender) &&
                 ParseBehaviorProfile(fields[3], definition.profile) &&
-                IsPlayableRace(definition.race) && IsPlayableClass(definition.playerClass) &&
+                IsPlayableRaceClassCombination(definition.race, definition.playerClass) &&
                 definition.gender <= 1;
 
             if (!valid)
             {
                 if (errors)
                     errors->push_back("roster entry " + std::to_string(entryNumber) +
-                        " must be race:class:gender:balanced|cautious|questing|stress using playable WotLK IDs");
+                        " must be all[:profile] or race:class:gender:profile using a playable WotLK combination");
                 continue;
             }
 
@@ -173,9 +199,9 @@ namespace Factory
     {
         switch (profile)
         {
-            case BehaviorProfile::Cautious: return { 30, 65, 55 };
-            case BehaviorProfile::Questing: return { 15, 40, 30 };
-            case BehaviorProfile::Stress: return { 5, 25, 20 };
+            case BehaviorProfile::Cautious: return { 20, 65, 55 };
+            case BehaviorProfile::Questing: return { 20, 40, 30 };
+            case BehaviorProfile::Stress: return { 20, 25, 20 };
             case BehaviorProfile::Balanced:
             default: return { 20, 50, 40 };
         }

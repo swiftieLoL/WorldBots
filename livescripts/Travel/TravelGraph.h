@@ -60,11 +60,24 @@ namespace Travel
 
     struct RouteOptions
     {
-        std::unordered_set<uint32_t> knownTaxiNodes;
+        // A taxi node is usable only when the character has discovered it and
+        // its DBC mount belongs to the character's faction. Static taxi nodes
+        // must not become generic walking anchors for the opposite faction.
+        std::unordered_set<uint32_t> usableTaxiNodes;
         std::unordered_set<uint64_t> blockedEdges;
+        std::unordered_set<uint32_t> blockedNodes;
+        bool localGroundOnly = false;
         bool canUseHearthstone = false;
         Common::PositionInfo home;
     };
+
+    inline bool ShouldBlockFailedEdge(uint64_t edgeKey)
+    {
+        // blockedEdges is owned by one WorldTravel journey and is cleared by
+        // Reset(). A failed synthesized edge must therefore be blocked for
+        // the current replan just like an authored graph edge.
+        return edgeKey != 0;
+    }
 
     class TravelGraph
     {
@@ -82,6 +95,8 @@ namespace Travel
 
         static float Distance(const Common::PositionInfo& left, const Common::PositionInfo& right);
         static uint64_t MakeEdgeKey(uint32_t from, uint32_t to, TravelMode mode, uint32_t reference);
+        static bool IsGlobalPortalTransition(const Common::PositionInfo& source,
+            const Common::PositionInfo& destination);
 
     private:
         std::vector<TravelNode> _nodes;

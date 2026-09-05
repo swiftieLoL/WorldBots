@@ -33,10 +33,16 @@ namespace Factory
     };
 
     // Roster entries use race:class:gender:profile and are comma-separated.
+    // The all[:profile] shorthand expands to every playable WotLK race/class
+    // combination with male gender and the selected (or balanced) profile.
     // Invalid entries are reported and ignored; an empty result means callers
     // should use their configured character defaults.
     std::vector<BotDefinition> ParseBotRoster(std::string_view value,
         std::vector<std::string>* errors = nullptr);
+
+    bool IsPlayableRaceClassCombination(uint8_t race, uint8_t playerClass);
+    std::vector<BotDefinition> CreateFullCoverageRoster(
+        BehaviorProfile profile = BehaviorProfile::Balanced);
 
     BotDefinition SelectBotDefinition(const std::vector<BotDefinition>& roster,
         uint32_t slot, const BotDefinition& fallback);

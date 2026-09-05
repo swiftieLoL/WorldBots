@@ -1,4 +1,8 @@
 #include "RestAction.h"
+#include "Blackboard/BotBlackboard.h"
+#include "Globals/ObjectMgr.h"
+#include "ObjectAccessor.h"
+#include "Player.h"
 #include "Helper/InventoryUtils.h"
 #include "Item.h"
 #include "Bag.h"
@@ -8,18 +12,19 @@
 namespace Actions
 {
     RestAction::RestAction()
-        : _completed(false), _consumeCooldownMs(0), _restTimerMs(0)
+        : _consumeCooldownMs(0), _restTimerMs(0)
     {
     }
 
     void RestAction::Start(Player* bot, MovementManager* movement)
     {
-        _completed = false;
+        ResetOutcome();
         _consumeCooldownMs = 0;
         _restTimerMs = 0;
         if (!bot || !bot->IsInWorld())
         {
-            _completed = true;
+            Finish(ActionOutcome::RetryableFailure, "rest context was unavailable",
+                FailureCategory::Transient, RecoveryDirective::RetryLater);
             return;
         }
 
@@ -41,19 +46,49 @@ namespace Actions
         }
     }
 
-    void RestAction::Update(Player* bot, MovementManager* movement, const Blackboard::BotBlackboard& /*blackboard*/, uint32_t deltaMs)
+    void RestAction::Update(Player* bot, MovementManager* movement, const Blackboard::BotBlackboard& blackboard, uint32_t deltaMs)
     {
+        if (_completed)
+            return;
+
         if (!bot || !bot->IsInWorld())
         {
-            _completed = true;
+            Finish(ActionOutcome::RetryableFailure, "bot left the world while resting",
+                FailureCategory::Transient, RecoveryDirective::RetryLater);
             return;
+        }
+
+        // Stand up immediately if combat begins or attackers are detected
+        if (bot->IsInCombat() || blackboard.self.inCombat || !blackboard.combat.attackerGuids.empty())
+        {
+            bot->SetStandState(UNIT_STAND_STATE_STAND);
+            Finish(ActionOutcome::Interrupted, "rest interrupted by combat",
+                FailureCategory::Interaction, RecoveryDirective::Replan);
+            return;
+        }
+
+        // Check if any hostile creature is within 15 yards to stand up before taking a 100% sitting crit
+        for (ObjectGuid hostileGuid : blackboard.spatial.hostileGuids)
+        {
+            if (Unit* hostile = ObjectAccessor::GetUnit(*bot, hostileGuid))
+            {
+                if (hostile->IsAlive() && hostile->IsInWorld() && hostile->GetMap() == bot->GetMap() &&
+                    bot->GetDistance(hostile) <= 15.0f)
+                {
+                    bot->SetStandState(UNIT_STAND_STATE_STAND);
+                    Finish(ActionOutcome::Interrupted, "rest interrupted by nearby approaching hostile",
+                        FailureCategory::Interaction, RecoveryDirective::Replan);
+                    return;
+                }
+            }
         }
 
         _restTimerMs += deltaMs;
         if (_restTimerMs >= 25000) // 25-second failsafe
         {
             bot->SetStandState(UNIT_STAND_STATE_STAND);
-            _completed = true;
+            Finish(ActionOutcome::Blocked, "vitals did not recover before the rest timeout",
+                FailureCategory::ServiceCapability, RecoveryDirective::Replan);
             return;
         }
 
@@ -84,13 +119,21 @@ namespace Actions
                 ItemTemplate const* pProto = pItem->GetTemplate();
                 if (!pProto || pProto->Class != ITEM_CLASS_CONSUMABLE) return true;
 
+                Helper::RecoveryConsumableRole role =
+                    Helper::InventoryUtils::GetRecoveryConsumableRole(pProto);
+                bool providesFood = role == Helper::RecoveryConsumableRole::Food ||
+                    role == Helper::RecoveryConsumableRole::FoodAndDrink;
+                bool providesDrink = role == Helper::RecoveryConsumableRole::Drink ||
+                    role == Helper::RecoveryConsumableRole::FoodAndDrink;
+                bool needsFood = hpPct < 85 && providesFood;
+                bool needsDrink = isManaClass && manaPct < 85 && providesDrink;
+                if (!needsFood && !needsDrink)
+                    return true;
+
                 for (uint8_t i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
                 {
                     if (pProto->Spells[i].SpellId > 0)
                     {
-                        if (!isManaClass && hpPct >= 85)
-                            continue;
-
                         bot->CastSpell(bot, pProto->Spells[i].SpellId, false);
                         if (Diagnostics::BotTrace::ShouldLog(bot))
                             TC_LOG_INFO("server", "[WorldBots] [Brain] Bot '{}' consumed '{}' (Spell: {}) for rapid vital recovery.",
@@ -114,7 +157,7 @@ namespace Actions
             if (Diagnostics::BotTrace::ShouldLog(bot))
                 TC_LOG_INFO("server", "[WorldBots] [Brain] Bot '{}' fully recovered vitals (HP: {}%, Mana: {}%). Resuming tasks.",
                     bot->GetName(), hpPct, manaPct);
-            _completed = true;
+            Finish(ActionOutcome::Succeeded, "vitals recovered");
         }
     }
 

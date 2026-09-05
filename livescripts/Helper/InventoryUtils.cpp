@@ -1,5 +1,6 @@
 #include "Globals/ObjectMgr.h"
 #include "InventoryUtils.h"
+#include "Diagnostics/BotTrace.h"
 
 #include "QuestDef.h"
 #include "SpellMgr.h"
@@ -50,12 +51,6 @@ namespace Helper
 
             return false;
         }
-    }
-
-    bool InventoryUtils::IsMandatoryInventoryItem(Player* bot, ItemTemplate const* proto)
-    {
-        return !bot || !proto || proto->ItemId == HearthstoneItemId ||
-            IsActiveQuestItem(bot, proto->ItemId);
     }
 
     RecoveryConsumableRole InventoryUtils::GetRecoveryConsumableRole(ItemTemplate const* proto)
@@ -118,8 +113,8 @@ namespace Helper
                 item->GetPos(),
                 proto->ItemLevel,
                 item->GetCount(),
-                role == RecoveryConsumableRole::Food || role == RecoveryConsumableRole::FoodAndDrink,
-                role == RecoveryConsumableRole::Drink || role == RecoveryConsumableRole::FoodAndDrink,
+                ProvidesFood(role),
+                ProvidesDrink(role),
                 bot->CanUseItem(proto) == EQUIP_ERR_OK
             });
             return true;
@@ -135,26 +130,26 @@ namespace Helper
     {
         ItemTemplate const* proto = item ? item->GetTemplate() : nullptr;
         if (!bot || !proto)
-            return { InventoryItemDisposition::Invalid, false, false, "invalid item" };
+            return { false, false, "invalid item" };
 
         if (proto->ItemId == HearthstoneItemId)
-            return { InventoryItemDisposition::ProtectHearthstone, false, false, "protected: Hearthstone" };
+            return { false, false, "protected: Hearthstone" };
 
         if (IsActiveQuestItem(bot, proto->ItemId))
-            return { InventoryItemDisposition::ProtectActiveQuest, false, false, "protected: active quest item" };
+            return { false, false, "protected: active quest item" };
 
         if (proto->SellPrice == 0)
         {
             if (proto->Quality == ITEM_QUALITY_POOR)
-                return { InventoryItemDisposition::DiscardPoorNoValue, false, true, "discardable when full: poor item with no vendor value" };
-            return { InventoryItemDisposition::ProtectNoSellValue, false, false, "protected: no vendor value" };
+                return { false, true, "discardable when full: poor item with no vendor value" };
+            return { false, false, "protected: no vendor value" };
         }
 
         if (proto->Quality == ITEM_QUALITY_POOR)
-            return { InventoryItemDisposition::SellPoor, true, false, "sell: poor quality" };
+            return { true, false, "sell: poor quality" };
 
         if (!context.lowSpace)
-            return { InventoryItemDisposition::ProtectWhileBagsHealthy, false, false, "protected: bags are not low" };
+            return { false, false, "protected: bags are not low" };
 
         bool equipment = proto->Class == ITEM_CLASS_WEAPON || proto->Class == ITEM_CLASS_ARMOR;
         if (equipment)
@@ -162,8 +157,8 @@ namespace Helper
             // AutoEquipUpgrades runs before selling. Remaining low-quality bag
             // equipment is surplus, while rare/epic pieces remain protected.
             if (proto->Quality <= ITEM_QUALITY_UNCOMMON)
-                return { InventoryItemDisposition::SellSurplusEquipment, true, false, "sell: surplus low-quality equipment" };
-            return { InventoryItemDisposition::ProtectHighQuality, false, false, "protected: rare-or-better equipment" };
+                return { true, false, "sell: surplus low-quality equipment" };
+            return { false, false, "protected: rare-or-better equipment" };
         }
 
         if (proto->Class == ITEM_CLASS_CONSUMABLE)
@@ -174,26 +169,36 @@ namespace Helper
                 bool retainedFood = item->GetPos() == context.reserves.foodPosition;
                 bool retainedDrink = item->GetPos() == context.reserves.drinkPosition;
                 if (retainedFood)
-                    return { InventoryItemDisposition::ProtectFoodReserve, false, false, "protected: retained food reserve" };
+                    return { false, false, "protected: retained food reserve" };
                 if (retainedDrink)
-                    return { InventoryItemDisposition::ProtectDrinkReserve, false, false, "protected: retained drink reserve" };
+                    return { false, false, "protected: retained drink reserve" };
                 if (role == RecoveryConsumableRole::Drink)
-                    return { InventoryItemDisposition::SellSurplusDrink, true, false, "sell: surplus drink stack" };
-                return { InventoryItemDisposition::SellSurplusFood, true, false, "sell: surplus food stack" };
+                    return { true, false, "sell: surplus drink stack" };
+                return { true, false, "sell: surplus food stack" };
             }
-            return { InventoryItemDisposition::ProtectConsumable, false, false, "protected: non-recovery consumable" };
+            return { false, false, "protected: non-recovery consumable" };
         }
 
         if (proto->Class == ITEM_CLASS_QUEST)
-            return { InventoryItemDisposition::ProtectQuestClass, false, false, "protected: quest-class item" };
+            return { false, false, "protected: quest-class item" };
+
+        if (proto->Class == ITEM_CLASS_PROJECTILE)
+            return { false, false, "protected: ammunition" };
+
+        if (proto->Class == ITEM_CLASS_REAGENT ||
+            (proto->Class == ITEM_CLASS_MISC && proto->SubClass == ITEM_SUBCLASS_JUNK_REAGENT))
+            return { false, false, "protected: spell reagent" };
+
+        if (proto->Class == ITEM_CLASS_CONTAINER)
+            return { false, false, "protected: container" };
 
         if (proto->Quality == ITEM_QUALITY_NORMAL)
-            return { InventoryItemDisposition::SellCommon, true, false, "sell: common non-consumable" };
+            return { true, false, "sell: common non-consumable" };
 
         if (proto->Quality > ITEM_QUALITY_NORMAL)
-            return { InventoryItemDisposition::ProtectHighQuality, false, false, "protected: uncommon-or-better non-equipment" };
+            return { false, false, "protected: uncommon-or-better non-equipment" };
 
-        return { InventoryItemDisposition::ProtectByPolicy, false, false, "protected by inventory policy" };
+        return { false, false, "protected by inventory policy" };
     }
 
     bool InventoryUtils::IsSellableForSpace(Player* bot, Item* item,
@@ -221,7 +226,10 @@ namespace Helper
              slot < INVENTORY_SLOT_BAG_END && equipped < bagCount; ++slot)
         {
             if (bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            {
+                ++equipped;
                 continue;
+            }
 
             uint16 destination = 0;
             InventoryResult result = bot->CanEquipNewItem(slot, destination, bagItemId, false);
@@ -236,7 +244,7 @@ namespace Helper
             added = true;
         }
 
-        if (added)
+        if (added && Diagnostics::BotTrace::ShouldLog(bot, Diagnostics::LogEvent::Normal))
         {
             TC_LOG_INFO("server", "[WorldBots] [Inventory] Equipped {} starter bag(s), item {}, for bot '{}'.",
                 equipped, bagItemId, bot->GetName());

@@ -21,6 +21,8 @@ namespace Brain
         Resurrect = 12,
         Unstuck = 13,
         TownRun = 14,
-        Grind = 15
+        Grind = 15,
+        RevivePartyMember = 16,
+        WaitForPartyResurrection = 17
     };
 }

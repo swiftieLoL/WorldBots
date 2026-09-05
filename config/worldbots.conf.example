@@ -2,10 +2,37 @@
 
 # Core runtime
 WorldBots.Enable = 1
+WorldBots.EnableDeathKnights = 0
 WorldBots.BotCount = 3
 WorldBots.MaxBotCount = 2000
-WorldBots.DebugMode = 1
-WorldBots.VerboseLogging = 0
+# important: module failures, startup, deaths, and severe recovery events.
+# normal: also records routine warnings, lifecycle, and progression milestones.
+# verbose: detailed behavior for every bot. For focused debugging, keep this
+# at important and use `.bot trace <name> on` instead.
+WorldBots.Logging = important
+# Include a traced bot's position every two seconds.
+WorldBots.Logging.Positions = 1
+
+# Dedicated file trace logger outside the console window.
+# Writes human-readable, timestamped traces directly to worldbots-trace.log.
+# Keeps the terminal console clean while capturing verbose bot behavior.
+WorldBots.Logging.File.Enable = 1
+WorldBots.Logging.File.Level = verbose
+WorldBots.Logging.File.Bots = all
+
+# Optional durable progress diagnostics. When enabled, WorldBots writes a
+# current snapshot and an append-only history as tab-separated files. The
+# snapshot is designed for live inspection; the history preserves the state
+# leading up to a stall without enabling verbose console logging.
+WorldBots.Diagnostics.Enable = 0
+WorldBots.Diagnostics.Directory = worldbots-diagnostics
+WorldBots.Diagnostics.IntervalSeconds = 60
+WorldBots.Diagnostics.StallMinutes = 30
+# Optional event-level path/action/recovery trace written to
+# worldbots-events-v1.tsv without enabling verbose console logging. List bot
+# names separated by commas, or use all. Keep the list focused on problem bots.
+WorldBots.Diagnostics.Events.Enable = 0
+WorldBots.Diagnostics.Events.Bots =
 
 # Dedicated mode creates one isolated, module-owned account per bot. This is
 # the safe default for concurrent bots and prevents characters being created
@@ -26,13 +53,19 @@ WorldBots.PersistentBotPercent = 100
 WorldBots.StarterBagItemId = 41599
 WorldBots.StarterBagCount = 4
 
-# Defer quests above the solo difficulty ceiling. When no safe quest is
-# actionable—or a quest repeatedly kills/stalls a bot—hunt normal enemies in
-# this level band and retry the failed quest after gaining one level.
+# Defer quests above the solo difficulty ceiling. Bots try actionable active
+# quests, suitable nearby starters, and reachable level-appropriate world
+# starters before using this normal-enemy grind band as a final fallback.
+# A repeatedly failing quest is skipped without blocking unrelated quest work.
 WorldBots.GrindFallback.Enable = 1
 WorldBots.QuestMaxLevelsAboveBot = 1
 WorldBots.GrindMinLevelOffset = -3
 WorldBots.GrindMaxLevelOffset = 0
+
+# Straight-line, same-map distance cap for routine selling, repairs, and supply
+# provisioning. This prevents low-level bots from crossing a continent for a
+# vendor when no suitable service is reasonably nearby.
+WorldBots.MaxRoutineVendorTravelDistance = 2000
 
 # Enables development-only .bot test and .bot trace commands.
 # Keep disabled on normal realms.
@@ -45,10 +78,30 @@ WorldBots.SpawnDelayStepMs = 250
 # Limits synchronous account/character preparation work per 100ms factory
 # tick. Raise carefully when the database has ample headroom.
 WorldBots.FactoryOpsPerTick = 1
+# Stop account/character preparation after this elapsed main-thread budget,
+# even when the operation-count limit has not been reached.
+WorldBots.FactoryTaskBudgetMs = 5
+# Leave a quiet window after realm startup before account/character preparation
+# or bot logins begin, so real players can enter first.
+WorldBots.FactoryStartupGraceMs = 15000
+
+# Sense, think, and action passes rotate fairly through the active roster and
+# stop at either this bot count or the elapsed budget. Delayed bots receive the
+# full accumulated delta on their next pass.
+WorldBots.RuntimeBotBatchSize = 256
+WorldBots.RuntimeTaskBudgetMs = 4
 
 # Bound database-heavy character login pipelines and retry transient failures.
 # These defaults favor stability during 2,000-bot scale tests.
 WorldBots.MaxConcurrentLogins = 8
+# Minimum time between starting login pipelines. This prevents fast callbacks
+# and retries from refilling the concurrency window in one burst.
+WorldBots.LoginLaunchIntervalMs = 500
+# Pause new bot preparation and login launches while a real player is queued.
+WorldBots.PrioritizePlayerLogins = 1
+# Also reserve a short exclusive window whenever a new real-player network
+# session arrives, including realms where the player queue is disabled.
+WorldBots.PlayerLoginGraceMs = 5000
 WorldBots.LoginTimeoutMs = 120000
 WorldBots.LoginMaxRetries = 5
 WorldBots.LoginRetryInitialDelayMs = 5000
@@ -65,7 +118,8 @@ WorldBots.DefaultRace = 1
 WorldBots.DefaultClass = 1
 WorldBots.DefaultGender = 0
 
-# Optional repeating mixed-roster pattern:
-# race:class:gender:profile where profile is balanced, cautious, questing, or
-# stress. Leave blank to use the defaults above for every slot.
+# Optional repeating mixed-roster pattern. Use all[:profile] for all legal
+# non-DK WotLK race/class combinations (male), or comma-separated race:class:gender:profile
+# entries. Profiles are balanced, cautious, questing, or stress. Leave blank to
+# use the defaults above for every slot.
 WorldBots.Roster = 1:1:0:cautious,1:8:1:questing,3:3:0:balanced,1:5:1:cautious

@@ -1,4 +1,6 @@
 #include "FollowAction.h"
+#include "Globals/ObjectMgr.h"
+#include "Player.h"
 #include "ObjectAccessor.h"
 
 namespace Actions
@@ -10,22 +12,28 @@ namespace Actions
 
     void FollowAction::UpdateFollow(Player* bot, MovementManager* movement)
     {
-        if (movement && bot && _targetGuid)
+        if (!movement || !bot || !bot->IsInWorld() || !_targetGuid)
         {
-            Unit* target = ObjectAccessor::GetUnit(*bot, _targetGuid);
-            if (target && target->IsInWorld() && target->IsAlive())
-            {
-                movement->Follow(target, _distance, _angle);
-            }
-            else
-            {
-                _completed = true;
-            }
+            Finish(ActionOutcome::RetryableFailure, "follow context was unavailable",
+                movement ? FailureCategory::Transient : FailureCategory::Navigation,
+                RecoveryDirective::RetryLater);
+            return;
+        }
+
+        Unit* target = ObjectAccessor::GetUnit(*bot, _targetGuid);
+        if (target && target->IsInWorld() && target->IsAlive())
+        {
+            movement->Follow(target, _distance, _angle);
+        }
+        else
+        {
+            Finish(ActionOutcome::Succeeded, "follow target is no longer available");
         }
     }
 
     void FollowAction::Start(Player* bot, MovementManager* movement)
     {
+        ResetOutcome();
         UpdateFollow(bot, movement);
     }
 
@@ -40,10 +48,5 @@ namespace Actions
         {
             movement->Stop();
         }
-    }
-
-    bool FollowAction::IsComplete() const
-    {
-        return _completed || !_targetGuid;
     }
 }

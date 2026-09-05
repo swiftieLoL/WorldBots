@@ -3,6 +3,7 @@
 #include "ScheduledTask.h"
 #include <vector>
 #include <memory>
+#include <string>
 
 namespace Framework
 {

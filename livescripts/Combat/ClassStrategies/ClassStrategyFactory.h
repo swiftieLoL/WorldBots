@@ -1,7 +1,7 @@
 #pragma once
 
 #include "IClassStrategy.h"
-#include "SharedDefines.h"
+#include <cstdint>
 #include <memory>
 
 namespace Combat
