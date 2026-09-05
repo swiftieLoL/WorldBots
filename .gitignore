@@ -65,8 +65,10 @@ log.txt
 *~
 
 # AI agent local metadata
-/.agents/
-/.gemini/
+.agents/
+.gemini/
+GEMINI.md
+gemini.md
 
 # Operating system & editor files
 .DS_Store
