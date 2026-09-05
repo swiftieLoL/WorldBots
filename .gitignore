@@ -69,6 +69,8 @@ log.txt
 .gemini/
 GEMINI.md
 gemini.md
+*lessons_learned.md
+docs/*lessons_learned.md
 
 # Operating system & editor files
 .DS_Store
