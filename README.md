@@ -193,10 +193,9 @@ All test suites will execute and verify goal selection, vendor vertical weightin
 ## Documentation & Architecture References
 
 - [Architecture Blueprint](ARCHITECTURE.md) - Subsystem breakdown, threading contracts, and lifecycle specifications.
-- [WorldBots Lessons Learned](docs/worldbots_lessons_learned.md) - Deep architectural patterns, thread safety, and memory management lessons.
-- [TSWoW Framework Guidelines](docs/tswow_lessons_learned.md) - Build pipelines, Livescripts vs. Datascripts rules, and TrinityCore FFI.
 - [Testing Guide](docs/testing.md) - Comprehensive testing procedures and command references.
 - [Configuration Reference](docs/configuration.md) - Full reference for all configuration options.
+- [Contribution Guidelines](CONTRIBUTING.md) - Coding standards, memory safety, and PR submission rules.
 
 ---
 

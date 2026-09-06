@@ -138,27 +138,54 @@ namespace Helper
         if (IsActiveQuestItem(bot, proto->ItemId))
             return { false, false, "protected: active quest item" };
 
+        if (proto->Class == ITEM_CLASS_REAGENT ||
+            (proto->Class == ITEM_CLASS_MISC && proto->SubClass == ITEM_SUBCLASS_JUNK_REAGENT))
+            return { false, false, "protected: spell reagent" };
+
+        if (proto->Class == ITEM_CLASS_PROJECTILE)
+            return { false, false, "protected: ammunition" };
+
         if (proto->SellPrice == 0)
         {
             if (proto->Quality == ITEM_QUALITY_POOR)
                 return { false, true, "discardable when full: poor item with no vendor value" };
+            if (proto->Class == ITEM_CLASS_QUEST)
+                return { false, true, "discardable when full: obsolete quest item with no vendor value" };
+            if (proto->Class == ITEM_CLASS_RECIPE)
+                return { false, true, "discardable when full: unsellable recipe" };
             return { false, false, "protected: no vendor value" };
         }
 
         if (proto->Quality == ITEM_QUALITY_POOR)
             return { true, false, "sell: poor quality" };
 
+        if (proto->Class == ITEM_CLASS_QUEST)
+            return { true, false, "sell: obsolete quest item" };
+
         if (!context.lowSpace)
             return { false, false, "protected: bags are not low" };
+
+        // Evaluated when bag space is low (<= 3 free slots)
+        if (proto->Class == ITEM_CLASS_RECIPE)
+            return { true, false, "sell: recipe" };
+
+        if (proto->Class == ITEM_CLASS_TRADE_GOODS || proto->Class == ITEM_CLASS_GEM)
+            return { true, false, "sell: surplus trade goods / gem for space" };
+
+        if (proto->Class == ITEM_CLASS_CONTAINER)
+            return { true, false, "sell: surplus unequipped container" };
 
         bool equipment = proto->Class == ITEM_CLASS_WEAPON || proto->Class == ITEM_CLASS_ARMOR;
         if (equipment)
         {
-            // AutoEquipUpgrades runs before selling. Remaining low-quality bag
-            // equipment is surplus, while rare/epic pieces remain protected.
-            if (proto->Quality <= ITEM_QUALITY_UNCOMMON)
-                return { true, false, "sell: surplus low-quality equipment" };
-            return { false, false, "protected: rare-or-better equipment" };
+            // AutoEquipUpgrades runs before selling. Remaining bag equipment is surplus.
+            if (proto->Quality <= ITEM_QUALITY_RARE ||
+                bot->CanUseItem(proto) != EQUIP_ERR_OK ||
+                proto->RequiredLevel > bot->GetLevel() + 3)
+            {
+                return { true, false, "sell: surplus equipment" };
+            }
+            return { true, false, "sell: surplus epic equipment" };
         }
 
         if (proto->Class == ITEM_CLASS_CONSUMABLE)
@@ -176,27 +203,16 @@ namespace Helper
                     return { true, false, "sell: surplus drink stack" };
                 return { true, false, "sell: surplus food stack" };
             }
+            if (proto->SubClass == ITEM_SUBCLASS_CONSUMABLE_OTHER || proto->SubClass == ITEM_SUBCLASS_SCROLL)
+                return { true, false, "sell: surplus scroll / misc consumable" };
             return { false, false, "protected: non-recovery consumable" };
         }
-
-        if (proto->Class == ITEM_CLASS_QUEST)
-            return { false, false, "protected: quest-class item" };
-
-        if (proto->Class == ITEM_CLASS_PROJECTILE)
-            return { false, false, "protected: ammunition" };
-
-        if (proto->Class == ITEM_CLASS_REAGENT ||
-            (proto->Class == ITEM_CLASS_MISC && proto->SubClass == ITEM_SUBCLASS_JUNK_REAGENT))
-            return { false, false, "protected: spell reagent" };
-
-        if (proto->Class == ITEM_CLASS_CONTAINER)
-            return { false, false, "protected: container" };
 
         if (proto->Quality == ITEM_QUALITY_NORMAL)
             return { true, false, "sell: common non-consumable" };
 
         if (proto->Quality > ITEM_QUALITY_NORMAL)
-            return { false, false, "protected: uncommon-or-better non-equipment" };
+            return { true, false, "sell: uncommon-or-better surplus item" };
 
         return { false, false, "protected by inventory policy" };
     }

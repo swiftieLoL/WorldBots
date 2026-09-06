@@ -10,7 +10,8 @@ namespace Town
             return step.service == Service::Sell ||
                    step.service == Service::Repair ||
                    step.service == Service::Restock ||
-                   step.service == Service::CreateRewardSpace;
+                   step.service == Service::CreateRewardSpace ||
+                   step.service == Service::PartyVisit;
         });
     }
 
@@ -40,7 +41,10 @@ namespace Town
         plan.targetFreeBagSlots = needsReservedSpace ? input.rewardReserveSlots :
             (needsFallbackCapacityCleanup ? 1u : 0u);
 
-        bool needsInventoryVendor = shouldSell || shouldCreateSpace;
+        bool shouldVisitForParty = input.partyNeedsVendor && input.hasInventoryVendor;
+        bool needsInventoryVendor = shouldSell || shouldCreateSpace || shouldVisitForParty;
+        if (shouldVisitForParty)
+            plan.partyMemberGuid = input.partyMemberGuid;
         if ((needsInventoryVendor && !hasInventoryVendor) ||
             (input.needsRepair && !hasRepairVendor) ||
             (input.needsRestock && !hasRestockVendor))
@@ -50,6 +54,9 @@ namespace Town
         {
             if (shouldSell)
                 plan.steps.push_back({ Service::Sell, 0 });
+
+            if (shouldVisitForParty)
+                plan.steps.push_back({ Service::PartyVisit, 0 });
 
             if (shouldCreateSpace)
             {
@@ -108,6 +115,8 @@ namespace Town
                     return "Equipment Repair";
                 case Service::Restock:
                     return "Supply Restock";
+                case Service::PartyVisit:
+                    return "Party Vendor Visit";
                 case Service::TurnInQuest:
                     return "Quest Turn-In";
             }

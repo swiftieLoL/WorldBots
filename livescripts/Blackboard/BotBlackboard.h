@@ -214,6 +214,8 @@ namespace Blackboard
         std::vector<uint32_t> leaderQuestIds;
         uint32_t laggingQuestId = 0;
         std::vector<ObjectGuid> memberGuids;
+        bool memberNeedsTownRun = false;
+        ObjectGuid memberNeedingTownRunGuid;
     };
 
     struct CombatState : RefreshState

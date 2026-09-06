@@ -148,6 +148,7 @@ namespace Actions
             bool requireRepair = phase == Town::Service::Repair;
             bool requireInventoryProgress = false;
             bool requireRestock = phase == Town::Service::Restock;
+            bool partyVisit = phase == Town::Service::PartyVisit;
             uint32_t targetFreeSlots = 0;
             while (_nextStep < _plan.steps.size())
             {
@@ -167,7 +168,8 @@ namespace Actions
             }
             nextChild = std::make_unique<VendorAction>(targetFreeSlots, requireRepair,
                 requireInventoryProgress, requireRestock, _suppressedNpcEntries,
-                _maxVendorTravelDistance);
+                _maxVendorTravelDistance, partyVisit,
+                partyVisit ? ObjectGuid(_plan.partyMemberGuid) : ObjectGuid::Empty);
         }
 
         StartChild(std::move(nextChild), bot, movement);

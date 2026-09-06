@@ -1193,9 +1193,9 @@ namespace Brain
             }
         }
 
-        // Priority 1.8: Emergency Vendoring if bags are 100% full and bot has items to sell or gear to repair
+        // Priority 1.8: Emergency Vendoring if bags are full/nearly full (<= 1 free slot) and bot has items to sell or gear to repair
         if (!inventoryCleanupDeferred && !townServiceDeferred &&
-            _blackboard.inv.bagsFull &&
+            (_blackboard.inv.bagsFull || _blackboard.inv.freeBagSlots <= 1) &&
             (_blackboard.inv.hasItemsToSell || _blackboard.inv.needsRepair))
         {
             uint32_t vendorEntry = 0;
@@ -1271,6 +1271,21 @@ namespace Brain
             return;
         }
 
+        // Priority 3.3: Party Leader Town Run Coordination
+        // If a party member has full bags (<= 1 free slot) or broken gear,
+        // the leader initiates a town run so the entire party travels to a vendor hub together.
+        if (_blackboard.party.isGroupLeader && _blackboard.party.memberNeedsTownRun &&
+            !townServiceDeferred)
+        {
+            uint32_t vendorEntry = 0;
+            if (FindVendorForInventory(bot, vendorEntry, true, false, nullptr,
+                &_suppressions.GetBlacklistedNpcs(), maxServiceTravelDistance) &&
+                TrySetTownRunGoal())
+            {
+                return;
+            }
+        }
+
         // Priority 3.4: the leader keeps a completed shared quest nearby until
         // local party members finish it, so kills and interactions continue
         // to receive group credit before the coordinated turn-in.
@@ -1326,32 +1341,35 @@ namespace Brain
         // the party leash. Once formation is restored they resume the shared
         // quest below, preserving normal loot/town/turn-in recovery above.
         if (_blackboard.party.isInGroup && !_blackboard.party.isGroupLeader &&
-            _blackboard.party.groupLeaderGuid && _blackboard.party.leaderOnSameMap &&
-            _blackboard.party.leaderDistance > 25.0f)
+            _blackboard.party.groupLeaderGuid && _blackboard.party.leaderOnSameMap)
         {
-            // If the follower is standing close (<= 15y) to a questgiver offering an accepted leader quest,
-            // allow the follower to accept the quest first before sprinting after the leader.
-            bool hasNearbyLeaderQuestToAccept = false;
-            for (uint32_t leaderQuestId : _blackboard.party.leaderQuestIds)
+            float leashThreshold = (_goal == BotGoal::FollowTarget) ? 12.0f : 30.0f;
+            if (_blackboard.party.leaderDistance > leashThreshold)
             {
-                auto available = std::find_if(_blackboard.quest.availableQuests.begin(),
-                    _blackboard.quest.availableQuests.end(), [leaderQuestId, bot](const auto& quest) {
-                        return quest.questId == leaderQuestId && quest.hasQuestGiverPosition &&
-                            Helper::Distance2D(bot->GetPositionX(), bot->GetPositionY(),
-                                quest.questGiverPosition.x, quest.questGiverPosition.y) <= 15.0f;
-                    });
-                if (available != _blackboard.quest.availableQuests.end() &&
-                    !_suppressions.IsQuestSuppressed(leaderQuestId, nowSec))
+                // If the follower is standing close (<= 15y) to a questgiver offering an accepted leader quest,
+                // allow the follower to accept the quest first before sprinting after the leader.
+                bool hasNearbyLeaderQuestToAccept = false;
+                for (uint32_t leaderQuestId : _blackboard.party.leaderQuestIds)
                 {
-                    hasNearbyLeaderQuestToAccept = true;
-                    break;
+                    auto available = std::find_if(_blackboard.quest.availableQuests.begin(),
+                        _blackboard.quest.availableQuests.end(), [leaderQuestId, bot](const auto& quest) {
+                            return quest.questId == leaderQuestId && quest.hasQuestGiverPosition &&
+                                Helper::Distance2D(bot->GetPositionX(), bot->GetPositionY(),
+                                    quest.questGiverPosition.x, quest.questGiverPosition.y) <= 15.0f;
+                        });
+                    if (available != _blackboard.quest.availableQuests.end() &&
+                        !_suppressions.IsQuestSuppressed(leaderQuestId, nowSec))
+                    {
+                        hasNearbyLeaderQuestToAccept = true;
+                        break;
+                    }
                 }
-            }
 
-            if (!hasNearbyLeaderQuestToAccept)
-            {
-                SetGoal(BotGoal::FollowTarget);
-                return;
+                if (!hasNearbyLeaderQuestToAccept)
+                {
+                    SetGoal(BotGoal::FollowTarget);
+                    return;
+                }
             }
         }
 
@@ -1667,6 +1685,12 @@ namespace Brain
         Town::PlanningInput input;
         input.freeBagSlots = _blackboard.inv.freeBagSlots;
         input.hasSellableItems = _blackboard.inv.hasItemsToSell;
+        input.partyNeedsVendor = _blackboard.party.isGroupLeader &&
+            _blackboard.party.memberNeedsTownRun &&
+            _blackboard.party.memberNeedingTownRunGuid &&
+            _blackboard.party.memberNeedingTownRunGuid != bot->GetGUID();
+        input.partyMemberGuid = input.partyNeedsVendor
+            ? _blackboard.party.memberNeedingTownRunGuid.GetRawValue() : 0;
         input.needsInventoryCleanup = !inventoryCleanupDeferred &&
             !townServiceDeferred &&
             (_blackboard.inv.lowBagSpace || _blackboard.inv.bagsFull ||
@@ -1727,7 +1751,7 @@ namespace Brain
         bool needsRewardSpace = hasBlockedReward && input.freeBagSlots < input.rewardReserveSlots;
         Cache::PositionInfo servicePosition;
         uint32_t vendorEntry = 0;
-        bool requireInventoryVendor = input.needsInventoryCleanup || needsRewardSpace;
+        bool requireInventoryVendor = input.needsInventoryCleanup || needsRewardSpace || input.partyNeedsVendor;
         input.hasInventoryVendor = requireInventoryVendor &&
             FindVendorForInventory(bot, vendorEntry, true, false, &servicePosition,
                 &_suppressions.GetBlacklistedNpcs(), maxServiceTravelDistance);

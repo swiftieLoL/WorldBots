@@ -17,11 +17,13 @@ namespace Actions
         explicit VendorAction(uint32_t targetFreeSlots = 0, bool requireRepair = false,
             bool requireInventoryProgress = true, bool requireRestock = false,
             std::unordered_map<uint32_t, uint32_t> suppressedNpcEntries = {},
-            float maxTravelDistance = std::numeric_limits<float>::max())
+            float maxTravelDistance = std::numeric_limits<float>::max(),
+            bool partyVisit = false, ObjectGuid partyMemberGuid = ObjectGuid::Empty)
             : _targetFreeSlots(targetFreeSlots), _requireRepair(requireRepair),
               _requireInventoryProgress(requireInventoryProgress), _requireRestock(requireRestock),
               _suppressedNpcEntries(std::move(suppressedNpcEntries)),
-              _maxTravelDistance(maxTravelDistance) { }
+              _maxTravelDistance(maxTravelDistance), _partyVisit(partyVisit),
+              _partyMemberGuid(partyMemberGuid) { }
 
         const char* GetName() const override { return "VendorAction"; }
 
@@ -59,5 +61,7 @@ namespace Actions
         std::unordered_map<uint32_t, uint32_t> _suppressedNpcEntries;
         float _maxTravelDistance = std::numeric_limits<float>::max();
         uint32_t _unreachableVendorCount = 0;
+        bool _partyVisit = false;
+        ObjectGuid _partyMemberGuid;
     };
 }

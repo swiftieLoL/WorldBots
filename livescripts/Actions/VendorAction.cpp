@@ -150,7 +150,12 @@ namespace Actions
         }
 
         // Search for nearest Vendor or Repair NPC within 30 yards
-        bool reqRepair = _requireRepair || blackboard.inv.needsRepair;
+        bool reqRepair = _requireRepair || (!_partyVisit && blackboard.inv.needsRepair);
+        if (_partyVisit && _partyMemberGuid)
+        {
+            if (Player* member = ObjectAccessor::FindPlayer(_partyMemberGuid))
+                reqRepair = CalculateRepairCost(member, 1.0f) > 0;
+        }
         bool reqVendor = _requireInventoryProgress || _requireRestock || !reqRepair;
         auto supplyCapability = [this](Creature* creature) {
             return creature && !IsNpcSuppressed(creature->GetEntry());
@@ -428,6 +433,16 @@ namespace Actions
     void VendorAction::ExecuteTransaction(Player* bot, Creature* vendor, uint32_t totalBagSlots, bool logInventory)
     {
         uint32 freeSlotsBefore = Helper::InventoryUtils::CountFreeBagSlots(bot);
+
+        // A party visit escorts the requesting member to a service vendor.
+        // The leader is not the subject of that request, so do not mutate or
+        // require progress in the leader's inventory during this visit.
+        if (_partyVisit)
+        {
+            _outcome = ActionOutcome::Succeeded;
+            _completed = true;
+            return;
+        }
 
         // Equip first so an upgrade does not get treated as surplus equipment.
         AutoEquipUpgrades(bot);

@@ -1,9 +1,11 @@
 #include "SenseUpdaters.h"
+#include "Helper/InventoryUtils.h"
 #include "Helper/SpellUtils.h"
 #include "Party/PartyCoordination.h"
 #include "ObjectAccessor.h"
 #include "Globals/ObjectMgr.h"
 #include "Player.h"
+#include "Entities/Item/Item.h"
 #include "Group.h"
 #include "QuestDef.h"
 #include <algorithm>
@@ -25,12 +27,43 @@ namespace Sense
             Party::RoleAssignment assignment;
             std::vector<uint32_t> leaderQuestIds;
             std::vector<uint32_t> leaderCompletedQuestIds;
+            bool memberNeedsTownRun = false;
+            ObjectGuid memberNeedingTownRunGuid;
         };
 
         std::mutex s_partySnapshotMutex;
         std::unordered_map<uint64_t, SharedPartySnapshot> s_partySnapshots;
         constexpr auto SharedPartySnapshotTtl = std::chrono::milliseconds(100);
         constexpr auto SharedPartySnapshotRetention = std::chrono::seconds(30);
+
+        bool HasItemsNeedingRepair(Player* player)
+        {
+            if (!player)
+                return false;
+
+            auto needsRepair = [](Item* item) {
+                return item && item->CalculateDurabilityRepairCost(1.0f) > 0;
+            };
+
+            // Match the core durability scan coverage without invoking a
+            // mutating repair path.
+            for (uint8 slot = EQUIPMENT_SLOT_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            {
+                if (needsRepair(player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot)))
+                    return true;
+            }
+
+            for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+            {
+                for (uint8 slot = 0; slot < MAX_BAG_SIZE; ++slot)
+                {
+                    if (needsRepair(player->GetItemByPos(bag, slot)))
+                        return true;
+                }
+            }
+
+            return false;
+        }
     }
 
 
@@ -69,6 +102,8 @@ namespace Sense
         party.formationDistance = 2.0f;
         party.formationAngle = 0.0f;
         party.laggingQuestId = 0;
+        party.memberNeedsTownRun = false;
+        party.memberNeedingTownRunGuid.Clear();
 
         if (!bot || !bot->IsInWorld()) return;
 
@@ -110,6 +145,18 @@ namespace Sense
                     newSnapshot.memberGuids.push_back(member->GetGUID());
                     descriptors.push_back({ member->GetGUID().GetRawValue(), member->GetClass(),
                         declaredRoles, member->GetGUID() == newSnapshot.leaderGuid });
+
+                    if (member->IsAlive())
+                    {
+                        uint32 freeSlots = Helper::InventoryUtils::CountFreeBagSlots(member);
+                        bool memberFullBags = (freeSlots <= 1);
+                        bool memberNeedsRepair = HasItemsNeedingRepair(member);
+                        if (!newSnapshot.memberNeedsTownRun && (memberFullBags || memberNeedsRepair))
+                        {
+                            newSnapshot.memberNeedsTownRun = true;
+                            newSnapshot.memberNeedingTownRunGuid = member->GetGUID();
+                        }
+                    }
                 }
                 newSnapshot.assignment = Party::AssignRoles(descriptors);
                 if (Player* leader = ObjectAccessor::FindPlayer(newSnapshot.leaderGuid))
@@ -138,6 +185,8 @@ namespace Sense
 
         party.memberGuids = snapshot.memberGuids;
         party.leaderQuestIds = snapshot.leaderQuestIds;
+        party.memberNeedsTownRun = snapshot.memberNeedsTownRun;
+        party.memberNeedingTownRunGuid = snapshot.memberNeedingTownRunGuid;
         std::vector<Player*> liveMembers;
         liveMembers.reserve(snapshot.memberGuids.size());
         float minDeadDist = std::numeric_limits<float>::max();

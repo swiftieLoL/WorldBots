@@ -15,6 +15,7 @@
 #include "Party/PartyCoordination.h"
 #include "Party/PartyRecruitmentPolicy.h"
 #include "Helper/VendorSelectionPolicy.h"
+#include "Scheduler/Scheduler.h"
 
 #include <algorithm>
 #include <iostream>
@@ -749,6 +750,62 @@ namespace
         Expect(!Party::ShouldKeepGroupTogether(true, true, 1),
             "Solo bot (size 1) should not maintain group");
     }
+
+    void TestPartyNeedsVendorProducesTownPlan()
+    {
+        Town::PlanningInput input;
+        input.freeBagSlots = 10;
+        input.hasInventoryVendor = true;
+        input.partyNeedsVendor = true;
+        input.partyMemberGuid = 42;
+
+        Town::Plan plan = Town::BuildPlan(input);
+        Expect(!plan.Empty(), "party needing vendor should produce a town run for the group");
+        Expect(plan.steps == std::vector<Town::Step>{ { Town::Service::PartyVisit, 0 } },
+            "party needing vendor should route to a party visit service");
+        Expect(plan.partyMemberGuid == 42,
+            "party vendor plan should retain the member requesting service");
+        Expect(plan.RequiresVendorVisit(), "party vendor plan should require vendor visit");
+    }
+
+    void TestSchedulerKeepsStableTaskSnapshotDuringRemoval()
+    {
+        Framework::Scheduler scheduler;
+        int selfRemovingRuns = 0;
+        int followingRuns = 0;
+
+        scheduler.RegisterTask(std::make_shared<Framework::ScheduledTask>(
+            "self-removing", 100, [&](uint32_t) {
+                ++selfRemovingRuns;
+                scheduler.RemoveTask("self-removing");
+            }));
+        scheduler.RegisterTask(std::make_shared<Framework::ScheduledTask>(
+            "following", 100, [&](uint32_t) { ++followingRuns; }));
+
+        scheduler.Update(100);
+        Expect(selfRemovingRuns == 1 && followingRuns == 1,
+            "removing the current task must not skip the next due task");
+
+        scheduler.Update(100);
+        Expect(selfRemovingRuns == 1 && followingRuns == 2,
+            "a self-removed task must stay removed on later updates");
+    }
+
+    void TestFollowerLeashHysteresis()
+    {
+        auto shouldFollow = [](bool currentlyFollowing, float distance) {
+            float threshold = currentlyFollowing ? 12.0f : 30.0f;
+            return distance > threshold;
+        };
+
+        Expect(!shouldFollow(false, 10.0f), "close follower should not follow");
+        Expect(!shouldFollow(false, 25.0f), "follower within 30y should not prematurely switch to follow");
+        Expect(shouldFollow(false, 30.1f), "follower beyond 30y must switch to follow");
+
+        Expect(shouldFollow(true, 25.0f), "active follower at 25y must remain in follow");
+        Expect(shouldFollow(true, 13.0f), "active follower at 13y must remain in follow");
+        Expect(!shouldFollow(true, 12.0f), "active follower restored to <= 12y can resume other goals");
+    }
 }
 
 int main()
@@ -781,6 +838,9 @@ int main()
     TestPartyCandidateScoring();
     TestCandidateRankingTierPriority();
     TestGroupContinuity();
+    TestPartyNeedsVendorProducesTownPlan();
+    TestSchedulerKeepsStableTaskSnapshotDuringRemoval();
+    TestFollowerLeashHysteresis();
 
     if (failures != 0)
     {

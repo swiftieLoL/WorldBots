@@ -11,6 +11,7 @@ namespace Town
         Repair,
         Restock,
         CreateRewardSpace,
+        PartyVisit,
         TurnInQuest
     };
 
@@ -38,6 +39,8 @@ namespace Town
         bool hasInventoryVendor = false;
         bool hasRepairVendor = false;
         bool hasRestockVendor = false;
+        bool partyNeedsVendor = false;
+        uint64_t partyMemberGuid = 0;
         std::vector<QuestTurnInCandidate> completedQuests;
     };
 
@@ -53,6 +56,7 @@ namespace Town
     {
         std::vector<Step> steps;
         uint32_t targetFreeBagSlots = 0;
+        uint64_t partyMemberGuid = 0;
         bool blockedByMissingVendor = false;
         bool blockedByProtectedInventory = false;
 

@@ -28,12 +28,15 @@ namespace Framework
 
     void Scheduler::Update(uint32_t diff)
     {
-        for (size_t i = 0; i < _tasks.size(); ++i)
+        // Callbacks may register, remove, or clear tasks. Keep a stable
+        // snapshot for this update so vector mutations cannot skip a task,
+        // and retain the executing task until its callback returns even when
+        // the scheduler owns its last shared_ptr.
+        std::vector<std::shared_ptr<ScheduledTask>> tasks = _tasks;
+        for (const std::shared_ptr<ScheduledTask>& task : tasks)
         {
-            if (i < _tasks.size() && _tasks[i] && _tasks[i]->IsActive())
-            {
-                _tasks[i]->Update(diff);
-            }
+            if (task && task->IsActive())
+                task->Update(diff);
         }
     }
 }

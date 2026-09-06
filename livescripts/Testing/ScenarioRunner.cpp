@@ -15,6 +15,7 @@ namespace Testing
                 case Town::Service::Repair: return "Repair";
                 case Town::Service::Restock: return "Restock";
                 case Town::Service::CreateRewardSpace: return "CreateRewardSpace";
+                case Town::Service::PartyVisit: return "PartyVisit";
                 case Town::Service::TurnInQuest: return "TurnInQuest";
                 default: return "Unknown";
             }
